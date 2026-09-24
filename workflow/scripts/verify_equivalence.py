@@ -12,7 +12,7 @@ Usage (from the repository root):
         --parquet-dir /path/to/out --dsn postgresql+psycopg://user:pass@host/db
 
 Exit status is 1 if any dataset differs. Memory is bounded (see
-`sql_incremental.verify`); lower --threads/--max-rss-mb on small machines.
+`sqlsink.verify`); lower --threads/--max-rss-mb on small machines.
 """
 
 import argparse
@@ -21,9 +21,9 @@ from pathlib import Path
 
 import yaml
 
-from sql_incremental.manifest import load_manifest
-from sql_incremental.sink import make_sink, materialize
-from sql_incremental.verify import verify_sink
+from sqlsink.manifest import load_manifest
+from sqlsink.sink import make_sink, materialize
+from sqlsink.verify import verify_sink
 
 
 def main() -> int:

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import yaml
 
-from sql_incremental.manifest import load_manifest
+from sqlsink.manifest import load_manifest
 
 CONFIG = Path(__file__).parent.parent / "config" / "config.yaml"
 

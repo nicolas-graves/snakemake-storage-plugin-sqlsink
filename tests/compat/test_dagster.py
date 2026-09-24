@@ -10,9 +10,9 @@ import pytest
 from sqlalchemy import inspect
 
 from compat_support import MANIFEST, OTHER, PARTS_V2, capability, has_feature, joined_rows, original_rows, rewrite_contours
-from sql_incremental import fingerprint
-from sql_incremental.sink import make_sink, materialize, normalize, publish, stage
-from sql_incremental.sink_postgres import SqlSink
+from sqlsink import fingerprint
+from sqlsink.sink import make_sink, materialize, normalize, publish, stage
+from sqlsink.sink_postgres import SqlSink
 
 
 def _asset(sink, paths):
@@ -73,7 +73,7 @@ def test_one_logical_dataset_is_several_physical_objects_published_together(engi
 def _crash_on_second_marker(sink, monkeypatch):
     """Make the sink die between the commit of the first and second dataset."""
     calls = []
-    from sql_incremental import publish as publish_mod
+    from sqlsink import publish as publish_mod
 
     real = publish_mod._upsert_dataset_marker
 

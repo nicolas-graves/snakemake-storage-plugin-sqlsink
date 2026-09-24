@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from sqlalchemy import inspect, select, text
 
-from sql_incremental.metadata import analytics_table_updates
-from sql_incremental.publish import PublishConflict, publish_tables
-from sql_incremental.stage import stage_table
+from sqlsink.metadata import analytics_table_updates
+from sqlsink.publish import PublishConflict, publish_tables
+from sqlsink.stage import stage_table
 
 
 def _fetch_all(engine, table_name):
@@ -97,7 +97,7 @@ def test_changing_one_table_only_touches_that_table(engine, parquet_dir):
 
 
 def test_interrupted_stage_is_repaired_on_rerun(engine, parquet_dir, monkeypatch):
-    import sql_incremental.stage as stage_mod
+    import sqlsink.stage as stage_mod
 
     real_bulk_load = stage_mod.bulk_load
     calls = {"n": 0}

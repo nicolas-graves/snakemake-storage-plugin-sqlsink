@@ -6,10 +6,10 @@ import duckdb
 import pytest
 from compat_support import MANIFEST, capability, original_rows
 
-from sql_incremental.export import DatasetNotPublished, export_parquet
-from sql_incremental.queries import read_parquet_sql
-from sql_incremental.sink import materialize
-from sql_incremental.verify import verify_parquet_roundtrip
+from sqlsink.export import DatasetNotPublished, export_parquet
+from sqlsink.queries import read_parquet_sql
+from sqlsink.sink import materialize
+from sqlsink.verify import verify_parquet_roundtrip
 
 
 def _rows(path):

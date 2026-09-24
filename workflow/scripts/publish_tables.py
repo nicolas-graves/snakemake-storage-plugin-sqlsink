@@ -2,8 +2,8 @@
 
 import json
 
-from sql_incremental.engine import make_engine
-from sql_incremental.publish import publish_tables
+from sqlsink.engine import make_engine
+from sqlsink.publish import publish_tables
 
 engine = make_engine(snakemake.params.dsn)  # noqa: F821
 

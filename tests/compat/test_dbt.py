@@ -12,10 +12,10 @@ from sqlalchemy.exc import IntegrityError
 
 from fixtures.dialects import declared_keys, pk_columns, qualified
 from compat_support import MANIFEST, PARTS_V2, capability, has_feature, joined_rows, rewrite_contours
-from sql_incremental import metadata as meta_mod
-from sql_incremental import relations
-from sql_incremental.sink import OrphanFactsError, duckdb_session, materialize, normalize, publish, stage
-from sql_incremental.sink_postgres import SqlSink
+from sqlsink import metadata as meta_mod
+from sqlsink import relations
+from sqlsink.sink import OrphanFactsError, duckdb_session, materialize, normalize, publish, stage
+from sqlsink.sink_postgres import SqlSink
 
 KEYED = dataclasses.replace(MANIFEST, keyed=True)
 

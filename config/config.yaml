@@ -13,7 +13,7 @@ loader_version: 1
 # Logical datasets published as a compact fact table + shared contour
 # table + public compatibility view instead of a plain 1:1 Parquet->table
 # copy (see docs/postgresql-geometry-normalization.md in cgdd-sevs-ecf).
-# Each entry is a sql_incremental.manifest.DatasetMaterialization, loaded via
+# Each entry is a sqlsink.manifest.DatasetMaterialization, loaded via
 # manifest.load_manifest().
 #
 # Join columns and output_columns were read off the real Parquets (never

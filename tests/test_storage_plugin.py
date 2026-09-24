@@ -8,12 +8,12 @@ import logging
 
 import pytest
 
-from sql_incremental.publish import publish_tables
-from sql_incremental.stage import stage_table
+from sqlsink.publish import publish_tables
+from sqlsink.stage import stage_table
 
-pytest.importorskip("snakemake_storage_plugin_sql_incremental")
+pytest.importorskip("snakemake_storage_plugin_sqlsink")
 
-from snakemake_storage_plugin_sql_incremental import (  # noqa: E402
+from snakemake_storage_plugin_sqlsink import (  # noqa: E402
     StorageObject,
     StorageProvider,
     StorageProviderSettings,
@@ -93,7 +93,7 @@ def test_exists_false_when_the_published_table_was_dropped_but_its_marker_remain
 def test_exists_false_when_the_staging_table_was_dropped_but_its_marker_remains(provider, engine, parquet_dir):
     from sqlalchemy import text
 
-    from sql_incremental.metadata import staging_name
+    from sqlsink.metadata import staging_name
 
     stage_table(engine, "fake_a", str(parquet_dir["fake_a"]))
     assert _obj(provider, "fake_a").exists() is True  # staged, awaiting publish

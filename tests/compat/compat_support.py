@@ -8,9 +8,9 @@ import dataclasses
 import duckdb
 import pytest
 
-from sql_incremental.manifest import DatasetMaterialization
-from sql_incremental.queries import read_parquet_sql
-from sql_incremental.sink import duckdb_session
+from sqlsink.manifest import DatasetMaterialization
+from sqlsink.queries import read_parquet_sql
+from sqlsink.sink import duckdb_session
 
 MANIFEST = DatasetMaterialization(
     name="zones",

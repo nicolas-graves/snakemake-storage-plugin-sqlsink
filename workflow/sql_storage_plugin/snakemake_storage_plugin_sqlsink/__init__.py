@@ -5,13 +5,13 @@ Snakemake's own scheduler can decide -- via `exists()`/`mtime()` -- whether
 a table needs to be re-staged, instead of always running `stage_table` and
 having it write a no-op "current" receipt.
 
-This does NOT replace `sql_incremental.publish.publish_tables`: the storage
+This does NOT replace `sqlsink.publish.publish_tables`: the storage
 plugin interface has no notion of a transaction spanning several storage
 objects, so atomic multi-table publication stays a separate final rule, as
 before. See `workflow/rules/postgres_publish.smk`.
 
 The "local materialization" of a table is a small JSON manifest (the same
-shape as `sql_incremental.stage.StageReceipt.to_dict()`), never the table's
+shape as `sqlsink.stage.StageReceipt.to_dict()`), never the table's
 actual rows -- retrieving/storing it is therefore cheap regardless of table
 size.
 """
@@ -38,9 +38,9 @@ from snakemake_interface_storage_plugins.storage_provider import (
 )
 from snakemake_interface_storage_plugins.settings import StorageProviderSettingsBase
 
-from sql_incremental.engine import make_engine
-from sql_incremental.metadata import create_all
-from sql_incremental.stage import fetch_marker, fetch_staged_marker, is_current, stage_table
+from sqlsink.engine import make_engine
+from sqlsink.metadata import create_all
+from sqlsink.stage import fetch_marker, fetch_staged_marker, is_current, stage_table
 
 TABLE_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
@@ -73,7 +73,7 @@ class StorageProvider(StorageProviderBase):
             ExampleQuery(
                 query="some_table",
                 type=QueryType.OUTPUT,
-                description="Name of an analytics table published by sql_incremental.",
+                description="Name of an analytics table published by sqlsink.",
             )
         ]
 

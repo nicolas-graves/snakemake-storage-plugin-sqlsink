@@ -8,10 +8,10 @@ from __future__ import annotations
 from sqlalchemy import text
 
 from fixtures.make_fixtures import make_multipart_geometry_fixtures
-from sql_incremental import metadata as meta_mod
-from sql_incremental.manifest import DatasetMaterialization
-from sql_incremental.materialize import stage_contours, stage_dataset
-from sql_incremental.publish import publish_datasets
+from sqlsink import metadata as meta_mod
+from sqlsink.manifest import DatasetMaterialization
+from sqlsink.materialize import stage_contours, stage_dataset
+from sqlsink.publish import publish_datasets
 
 MANIFEST = DatasetMaterialization(
     name="zones",

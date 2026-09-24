@@ -9,8 +9,8 @@ pytz              # DuckDB returns TIMESTAMPTZ as tz-aware datetimes via pytz
 pytest
 
 # Two private, repo-local packages, not on PyPI -- install after the above:
-#   pip install -e workflow/scripts               # sql-incremental
-#   pip install workflow/sql_storage_plugin        # snakemake-storage-plugin-sql-incremental (non-editable:
+#   pip install -e workflow/scripts               # sqlsink
+#   pip install workflow/sql_storage_plugin        # snakemake-storage-plugin-sqlsink (non-editable:
 #                                                   # Snakemake's plugin auto-discovery scans installed
 #                                                   # top-level packages and does not reliably see editable
 #                                                   # installs -- reinstall this one after each edit)

@@ -22,7 +22,7 @@ import pytest
 import yaml
 from sqlalchemy import text
 
-from sql_incremental.engine import make_engine
+from sqlsink.engine import make_engine
 
 DSN = os.environ.get("SNAKEMAKE_SQL_TEST_PG_DSN")
 WORKFLOW = Path(__file__).resolve().parents[2] / "workflow"

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from compat_support import capability, has_feature
-from sql_incremental.relations import (
+from sqlsink.relations import (
     AmbiguousPathError,
     Edge,
     Entity,

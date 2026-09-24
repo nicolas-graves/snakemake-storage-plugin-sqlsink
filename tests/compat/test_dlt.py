@@ -12,9 +12,9 @@ from sqlalchemy.exc import IntegrityError
 
 from compat_support import MANIFEST, capability
 from fixtures.dialects import declared_keys, qualified
-from sql_incremental import metadata as meta_mod
-from sql_incremental.sink import materialize, normalize, stage
-from sql_incremental.sink_postgres import SqlSink, fetch_staged_dataset_marker
+from sqlsink import metadata as meta_mod
+from sqlsink.sink import materialize, normalize, stage
+from sqlsink.sink_postgres import SqlSink, fetch_staged_dataset_marker
 
 KEYED = dataclasses.replace(MANIFEST, keyed=True)
 

@@ -1,7 +1,7 @@
 """Per-table incremental publishing of Parquet outputs into the SQL database.
 
 Replaces the old monolithic "load everything" rule. `stage_table`'s output
-is backed by the private `sql-incremental` storage plugin
+is backed by the private `sqlsink` storage plugin
 (`workflow/sql_storage_plugin/`): Snakemake itself decides, via the plugin's
 `exists()`/`mtime()`, whether a table's Parquet changed since it was last
 published, and **skips the rule entirely** for tables that are already
@@ -21,7 +21,7 @@ should depend on `results/.db_published`, not on any individual table's
 receipt.
 
 This module is written against SQLAlchemy Core throughout (see
-`workflow/scripts/sql_incremental/`), so `config["db"]["dsn"]` can point at
+`workflow/scripts/sqlsink/`), so `config["db"]["dsn"]` can point at
 any SQLAlchemy-supported engine, not just PostgreSQL.
 """
 
@@ -37,8 +37,8 @@ DATASETS = config.get("datasets", [])
 DATASETS_BY_NAME = {d["name"]: d for d in DATASETS}
 
 
-storage sql_incremental:
-    provider="sql-incremental",
+storage sqlsink:
+    provider="sqlsink",
     dsn=config["db"]["dsn"],
     parquet_dir="results/parquet",
 
@@ -53,7 +53,7 @@ rule stage_table:
     input:
         parquet="results/parquet/{table}.parquet",
     output:
-        receipt=storage.sql_incremental("{table}"),
+        receipt=storage.sqlsink("{table}"),
     params:
         dsn=config["db"]["dsn"],
         table="{table}",
@@ -63,7 +63,7 @@ rule stage_table:
 
 rule publish_tables:
     input:
-        receipts=storage.sql_incremental(expand("{table}", table=TABLES)),
+        receipts=storage.sqlsink(expand("{table}", table=TABLES)),
     output:
         touch("results/.tables_published"),
     params:
@@ -73,7 +73,7 @@ rule publish_tables:
 
 
 # Datasets go through one materialization API with two SQL sinks
-# (`sql_incremental.sink`): "postgres" (production) and "duckdb" (a local
+# (`sqlsink.sink`): "postgres" (production) and "duckdb" (a local
 # database file, `duckdb_sink_path`); both hold a compact table + shared
 # contour table + compatibility view. `sinks:` in the config selects which
 # ones run; default is postgres only. The rules below are identical for
@@ -111,8 +111,8 @@ def _published_state(wildcards):
     "missing..." and re-stages once as a no-op; after that it is stable.)"""
     import time
 
-    from sql_incremental.manifest import load_manifest
-    from sql_incremental.sink import dataset_is_published
+    from sqlsink.manifest import load_manifest
+    from sqlsink.sink import dataset_is_published
 
     published = dataset_is_published(SINK_SPECS[wildcards.sink], load_manifest(DATASETS_BY_NAME[wildcards.dataset]))
     return "ok" if published else f"missing-{time.time_ns()}"

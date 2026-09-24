@@ -1,6 +1,6 @@
 import duckdb
 
-from sql_incremental.verify import compare_batched
+from sqlsink.verify import compare_batched
 
 COLUMNS = ["zone_id", "metric", "polygon_coords"]
 

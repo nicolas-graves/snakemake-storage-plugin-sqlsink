@@ -2,8 +2,8 @@
 
 import json
 
-from sql_incremental.engine import make_engine
-from sql_incremental.stage import stage_table
+from sqlsink.engine import make_engine
+from sqlsink.stage import stage_table
 
 engine = make_engine(snakemake.params.dsn)  # noqa: F821
 receipt = stage_table(engine, snakemake.params.table, snakemake.input.parquet)  # noqa: F821

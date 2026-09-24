@@ -3,11 +3,11 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sql-incremental"
+name = "sqlsink"
 version = "0.1.0"
 description = "Per-table incremental Parquet-to-SQL publishing core (private, repo-local, not published)."
 requires-python = ">=3.10"
 dependencies = ["sqlalchemy>=2.0", "duckdb"]
 
 [tool.setuptools]
-packages = ["sql_incremental"]
+packages = ["sqlsink"]

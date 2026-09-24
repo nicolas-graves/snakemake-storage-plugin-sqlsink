@@ -10,13 +10,13 @@ import pytest
 from sqlalchemy import inspect, text
 
 from fixtures.make_fixtures import make_multipart_geometry_fixtures
-from sql_incremental import metadata as meta_mod
-from sql_incremental.manifest import DatasetMaterialization
-from sql_incremental.publish import PublishConflict
-from sql_incremental.queries import read_parquet_sql
-from sql_incremental.sink import materialize, normalize, publish, stage
+from sqlsink import metadata as meta_mod
+from sqlsink.manifest import DatasetMaterialization
+from sqlsink.publish import PublishConflict
+from sqlsink.queries import read_parquet_sql
+from sqlsink.sink import materialize, normalize, publish, stage
 from fixtures.dialects import declared_keys, pk_columns, qualified
-from sql_incremental.sink_postgres import SqlSink
+from sqlsink.sink_postgres import SqlSink
 
 MANIFEST = DatasetMaterialization(
     name="zones",

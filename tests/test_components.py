@@ -7,15 +7,15 @@ import duckdb
 import pytest
 
 from fixtures.make_fixtures import make_multipart_geometry_fixtures
-from sql_incremental.components import (
+from sqlsink.components import (
     OrphanFactsError,
     export_joined_parquet,
     write_components,
 )
-from sql_incremental.join import Relation, join_spec, render_join_sql
-from sql_incremental.manifest import DatasetMaterialization
-from sql_incremental.materialize import compact_select_sql, read_parquet_sql, view_select_sql
-from sql_incremental.verify import verify_parquet_roundtrip
+from sqlsink.join import Relation, join_spec, render_join_sql
+from sqlsink.manifest import DatasetMaterialization
+from sqlsink.materialize import compact_select_sql, read_parquet_sql, view_select_sql
+from sqlsink.verify import verify_parquet_roundtrip
 
 MANIFEST = DatasetMaterialization(
     name="zones",
@@ -118,7 +118,7 @@ def test_verify_detects_schema_drift(tmp_path):
 def test_pipeline_can_stage_directly_from_compact_parquet(tmp_path, engine):
     """PostgreSQL loads the components with no new code path: the compact
     projection is idempotent on an already-compact Parquet."""
-    from sql_incremental.materialize import stage_contours, stage_dataset
+    from sqlsink.materialize import stage_contours, stage_dataset
 
     _, receipt, _, _ = _roundtrip(tmp_path)
     con = duckdb.connect()

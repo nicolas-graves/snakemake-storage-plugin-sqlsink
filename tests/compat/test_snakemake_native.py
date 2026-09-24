@@ -9,11 +9,11 @@ import duckdb
 import pytest
 
 from compat_support import capability
-from sql_incremental.publish import publish_tables
-from sql_incremental.stage import stage_table
+from sqlsink.publish import publish_tables
+from sqlsink.stage import stage_table
 
-pytest.importorskip("snakemake_storage_plugin_sql_incremental")
-from snakemake_storage_plugin_sql_incremental import (  # noqa: E402
+pytest.importorskip("snakemake_storage_plugin_sqlsink")
+from snakemake_storage_plugin_sqlsink import (  # noqa: E402
     StorageObject,
     StorageProvider,
     StorageProviderSettings,

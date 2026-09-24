@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from fixtures.make_fixtures import make_multipart_geometry_fixtures
-from sql_incremental.sink_postgres import SqlSink
+from sqlsink.sink_postgres import SqlSink
 
 _RESULTS = pytest.StashKey[dict]()
 

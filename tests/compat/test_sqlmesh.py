@@ -6,8 +6,8 @@ from __future__ import annotations
 from sqlalchemy import inspect, text
 
 from compat_support import MANIFEST, PARTS_V2, capability, rewrite_contours
-from sql_incremental.sink import materialize
-from sql_incremental.sink_postgres import SqlSink
+from sqlsink.sink import materialize
+from sqlsink.sink_postgres import SqlSink
 
 
 @capability("sqlmesh", "virtual_layer_repoint")

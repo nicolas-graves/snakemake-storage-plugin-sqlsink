@@ -8,10 +8,10 @@ import duckdb
 import pytest
 
 from fixtures.make_fixtures import make_multipart_geometry_fixtures
-from sql_incremental import publish as publish_mod
-from sql_incremental.manifest import DatasetMaterialization
-from sql_incremental.queries import read_parquet_sql
-from sql_incremental.sink import (
+from sqlsink import publish as publish_mod
+from sqlsink.manifest import DatasetMaterialization
+from sqlsink.queries import read_parquet_sql
+from sqlsink.sink import (
     OrphanFactsError,
     duckdb_session,
     make_sink,
@@ -20,7 +20,7 @@ from sql_incremental.sink import (
     publish,
     stage,
 )
-from sql_incremental.sink_postgres import SqlSink, fetch_staged_dataset_marker
+from sqlsink.sink_postgres import SqlSink, fetch_staged_dataset_marker
 
 MANIFEST = DatasetMaterialization(
     name="zones",
@@ -174,7 +174,7 @@ def test_a_republished_marker_advances_its_timestamp(kit, paths):
     sink, _ = kit
     from sqlalchemy import select
 
-    from sql_incremental import metadata as meta_mod
+    from sqlsink import metadata as meta_mod
 
     def published_at():
         with sink.engine.connect() as conn:

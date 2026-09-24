@@ -30,9 +30,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from sql_incremental.engine import make_engine  # noqa: E402
-from sql_incremental.fingerprint import compute_update_id_for_file  # noqa: E402
-from sql_incremental.metadata import analytics_table_updates, create_all  # noqa: E402
+from sqlsink.engine import make_engine  # noqa: E402
+from sqlsink.fingerprint import compute_update_id_for_file  # noqa: E402
+from sqlsink.metadata import analytics_table_updates, create_all  # noqa: E402
 from sqlalchemy import inspect, select, text  # noqa: E402
 
 

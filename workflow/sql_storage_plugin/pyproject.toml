@@ -3,14 +3,14 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "snakemake-storage-plugin-sql-incremental"
+name = "snakemake-storage-plugin-sqlsink"
 version = "0.1.0"
-description = "Private, repo-local Snakemake storage plugin wrapping sql_incremental. Not published to the plugin catalog: this project's own PostgreSQL-table-as-output need is not generic enough (and not common enough upstream) to justify a public plugin."
+description = "Private, repo-local Snakemake storage plugin wrapping sqlsink. Not published to the plugin catalog: this project's own PostgreSQL-table-as-output need is not generic enough (and not common enough upstream) to justify a public plugin."
 requires-python = ">=3.10"
 dependencies = [
     "snakemake-interface-storage-plugins>=4.4,<5",
-    "sql-incremental",
+    "sqlsink",
 ]
 
 [tool.setuptools]
-packages = ["snakemake_storage_plugin_sql_incremental"]
+packages = ["snakemake_storage_plugin_sqlsink"]

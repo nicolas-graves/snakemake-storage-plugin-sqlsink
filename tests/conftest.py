@@ -8,8 +8,8 @@ import pytest
 from sqlalchemy import text
 
 from fixtures.make_fixtures import make_default_fixtures  # noqa: E402
-from sql_incremental.engine import make_engine  # noqa: E402
-from sql_incremental.metadata import create_all  # noqa: E402
+from sqlsink.engine import make_engine  # noqa: E402
+from sqlsink.metadata import create_all  # noqa: E402
 
 
 @pytest.fixture

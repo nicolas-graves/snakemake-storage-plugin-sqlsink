@@ -2,8 +2,8 @@
 
 import json
 
-from sql_incremental.manifest import load_manifest
-from sql_incremental.sink import make_sink
+from sqlsink.manifest import load_manifest
+from sqlsink.sink import make_sink
 
 sink = make_sink(snakemake.params.sink)  # noqa: F821
 manifests = [load_manifest(spec) for spec in snakemake.params.manifests]  # noqa: F821

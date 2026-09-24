@@ -1,6 +1,6 @@
 import pytest
 
-from sql_incremental.relations import (
+from sqlsink.relations import (
     AmbiguousPathError,
     Edge,
     Entity,
