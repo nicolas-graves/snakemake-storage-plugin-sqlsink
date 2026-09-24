@@ -11,7 +11,7 @@ import datetime as dt
 from dataclasses import asdict, dataclass
 
 import duckdb
-from sqlalchemy import Column, MetaData, Table, select
+from sqlalchemy import Column, MetaData, Table, inspect, select
 
 from . import metadata as meta_mod
 from .engine import bulk_load, upsert_by_pk
@@ -105,26 +105,37 @@ def fetch_staged_marker(engine, table_name: str) -> dict | None:
 
 
 def is_current(engine, table_name: str, parquet_path: str, extra_config: dict | None = None) -> bool:
-    """Cheap, read-only freshness check (file hash + marker lookups, no
-    DuckDB read, no writes). True if this exact Parquet fingerprint has
-    already been either published or (at least) staged. Used by the
-    storage plugin's `exists()`, which must never mutate anything, and
-    must be able to report True right after staging -- before publish
-    ever runs -- without that meaning "published".
+    """Cheap, read-only freshness check (file hash + marker lookups + a table
+    existence check, no DuckDB read, no writes). True if this exact Parquet
+    fingerprint has already been published (and its table is still there) or
+    staged (and its staging table is still there). Used by the storage
+    plugin's `exists()`, which must never mutate anything, and must be able
+    to report True right after staging -- before publish ever runs --
+    without that meaning "published".
+
+    A marker alone is not enough: a table dropped or restored out of band
+    leaves its marker behind, and trusting it would keep Snakemake from ever
+    regenerating the table.
     """
     update_id, _ = compute_update_id_for_file(table_name, parquet_path, extra_config)
+    inspector = inspect(engine)
     marker = _fetch_marker(engine, table_name)
-    if marker is not None and marker["update_id"] == update_id:
+    if marker is not None and marker["update_id"] == update_id and inspector.has_table(table_name):
         return True
     staged = fetch_staged_marker(engine, table_name)
-    return staged is not None and staged["update_id"] == update_id
+    return (
+        staged is not None
+        and staged["update_id"] == update_id
+        and inspector.has_table(meta_mod.staging_name(table_name))
+    )
 
 
 def stage_table(engine, table_name: str, parquet_path: str, extra_config: dict | None = None) -> StageReceipt:
     update_id, parquet_sha256 = compute_update_id_for_file(table_name, parquet_path, extra_config)
     marker = _fetch_marker(engine, table_name)
+    inspector = inspect(engine)
 
-    if marker is not None and marker["update_id"] == update_id:
+    if marker is not None and marker["update_id"] == update_id and inspector.has_table(table_name):
         return StageReceipt(
             table=table_name,
             status="current",
@@ -138,7 +149,11 @@ def stage_table(engine, table_name: str, parquet_path: str, extra_config: dict |
         )
 
     staged = fetch_staged_marker(engine, table_name)
-    if staged is not None and staged["update_id"] == update_id:
+    if (
+        staged is not None
+        and staged["update_id"] == update_id
+        and inspector.has_table(meta_mod.staging_name(table_name))
+    ):
         # Already staged with this exact fingerprint (e.g. a prior
         # retrieve_object() call in this same run) -- no need to redo the
         # DuckDB read and bulk load.

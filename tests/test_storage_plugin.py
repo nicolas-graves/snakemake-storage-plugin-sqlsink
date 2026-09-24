@@ -76,3 +76,28 @@ def test_retrieve_object_writes_manifest_for_current_table(provider, engine, par
     manifest = json.loads(obj.local_path().read_text())
     assert manifest["table"] == "fake_a"
     assert manifest["status"] == "current"
+
+
+def test_exists_false_when_the_published_table_was_dropped_but_its_marker_remains(provider, engine, parquet_dir):
+    from sqlalchemy import text
+
+    receipt = stage_table(engine, "fake_a", str(parquet_dir["fake_a"]))
+    publish_tables(engine, [receipt.to_dict()])
+    with engine.begin() as conn:
+        conn.execute(text('DROP TABLE "fake_a"'))
+
+    assert _obj(provider, "fake_a").exists() is False
+    assert stage_table(engine, "fake_a", str(parquet_dir["fake_a"])).status == "staged"
+
+
+def test_exists_false_when_the_staging_table_was_dropped_but_its_marker_remains(provider, engine, parquet_dir):
+    from sqlalchemy import text
+
+    from sql_incremental.metadata import staging_name
+
+    stage_table(engine, "fake_a", str(parquet_dir["fake_a"]))
+    assert _obj(provider, "fake_a").exists() is True  # staged, awaiting publish
+    with engine.begin() as conn:
+        conn.execute(text(f'DROP TABLE "{staging_name("fake_a")}"'))
+
+    assert _obj(provider, "fake_a").exists() is False

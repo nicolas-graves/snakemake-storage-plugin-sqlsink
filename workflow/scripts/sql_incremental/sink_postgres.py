@@ -207,6 +207,22 @@ class SqlSink:
         marker = fetch_dataset_marker(self.engine, dataset_name)
         return marker["update_id"] if marker else None
 
+    def _has_table(self, bare_name: str, manifest: DatasetMaterialization) -> bool:
+        name, schema = meta_mod.physical_name_and_schema(self.engine.dialect.name, bare_name, manifest.compact_schema)
+        return inspect(self.engine).has_table(name, schema=schema)
+
+    def published_intact(self, manifest: DatasetMaterialization) -> bool:
+        """True if every published object a marker vouches for is still in the
+        database: compact table, contour (and zone) table, public view. A
+        marker outlives a table dropped or restored out of band, and trusting
+        it alone would never regenerate what is gone."""
+        bare = [meta_mod.compact_table_name(manifest.name), manifest.contour_table]
+        if manifest.keyed:
+            bare.append(manifest.zone_table)
+        return all(self._has_table(b, manifest) for b in bare) and manifest.name in inspect(
+            self.engine
+        ).get_view_names()
+
     def stage_contours(self, contour: ContourSource, con: duckdb.DuckDBPyConnection) -> ContourStageReceipt:
         """Stage the shared contour/dimension relation, independently of any
         one dataset's fact Parquet. Idempotent: a second dataset that shares
@@ -223,7 +239,12 @@ class SqlSink:
         engine, manifest = self.engine, contour.manifest
         contour_sha256 = contour.sha256
         published = fetch_contour_marker(engine, manifest.contour_table)
-        if published is not None and published["contour_sha256"] == contour_sha256:
+        live_bare = [manifest.contour_table, *([manifest.zone_table] if manifest.keyed else [])]
+        if (
+            published is not None
+            and published["contour_sha256"] == contour_sha256
+            and all(self._has_table(b, manifest) for b in live_bare)
+        ):
             return ContourStageReceipt(
                 kind="contour",
                 contour_table=manifest.contour_table,
@@ -235,7 +256,11 @@ class SqlSink:
             )
 
         staged = fetch_staged_contour_marker(engine, manifest.contour_table)
-        if staged is not None and staged["contour_sha256"] == contour_sha256:
+        if (
+            staged is not None
+            and staged["contour_sha256"] == contour_sha256
+            and self._has_table(meta_mod.staging_name(manifest.contour_table), manifest)
+        ):
             return ContourStageReceipt(
                 kind="contour",
                 contour_table=manifest.contour_table,
@@ -335,12 +360,12 @@ class SqlSink:
                 marker_update_id_at_stage_time=marker["update_id"] if marker else None,
             )
 
-        if marker is not None and marker["update_id"] == update_id:
+        if marker is not None and marker["update_id"] == update_id and self.published_intact(manifest):
             return receipt("current", None, marker["row_count"])
 
         staging_bare = meta_mod.staging_name(meta_mod.compact_table_name(manifest.name))
         staged = fetch_staged_dataset_marker(engine, manifest.name)
-        if staged is not None and staged["update_id"] == update_id:
+        if staged is not None and staged["update_id"] == update_id and self._has_table(staging_bare, manifest):
             return receipt("staged", staging_bare, staged["row_count"])
 
         project_sql = dataset.compact_query

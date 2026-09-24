@@ -84,15 +84,14 @@ rule publish_tables:
 # DuckDB allows one writer process per file: run with `--resources
 # duckdb_writer=1` so staging jobs on a DuckDB sink do not overlap.
 #
-# Dataset staging is not yet storage-plugin-backed (unlike stage_table
-# above): a dataset's freshness depends on two Parquets plus a manifest
-# hash, not one file, and Snakemake's storage-object interface has no
-# built-in notion of that composite identity. `sink.stage` computes a
-# correct update_id from all three, so this rule simply always runs and lets
-# it decide "current" vs "staged" -- the same no-op-but-cheap fallback
-# stage_table had before the storage plugin existed. Making the freshness
-# check itself skip the rule (like the per-table plugin does) is a
-# reasonable follow-up, not required for correctness.
+# Dataset staging is not storage-plugin-backed (unlike stage_table above): a
+# dataset's freshness depends on two Parquets plus a manifest hash, not one
+# file, and Snakemake's storage-object interface has no built-in notion of
+# that composite identity. Snakemake re-runs `stage_dataset` when a source
+# Parquet changes or when the `published` param (does the database still
+# hold the dataset?) changes -- see `_published_state`; `sink.stage` then computes the update_id from
+# both Parquets and the manifest and decides "current" vs "staged", so a
+# re-run for an unchanged dataset is a cheap no-op.
 SINK_SPECS = {
     "postgres": {"type": "postgres", "dsn": config["db"]["dsn"]},
     "duckdb": {"type": "duckdb", "path": config.get("duckdb_sink_path", "results/sink.duckdb")},
@@ -101,6 +100,22 @@ SINKS = config.get("sinks", ["postgres"])
 _unknown_sinks = set(SINKS) - set(SINK_SPECS)
 if _unknown_sinks:
     raise ValueError(f"unknown sink(s) in config `sinks`: {sorted(_unknown_sinks)}")
+
+
+def _published_state(wildcards):
+    """"ok" while the sink holds the dataset, else a value that never repeats.
+    Snakemake records a param as it was when the job was planned, i.e. before
+    the job published anything; a constant "missing" would therefore equal the
+    recorded value after the first run, and a dataset dropped later would go
+    unnoticed. (The first run after a repair sees "ok" against the recorded
+    "missing..." and re-stages once as a no-op; after that it is stable.)"""
+    import time
+
+    from sql_incremental.manifest import load_manifest
+    from sql_incremental.sink import dataset_is_published
+
+    published = dataset_is_published(SINK_SPECS[wildcards.sink], load_manifest(DATASETS_BY_NAME[wildcards.dataset]))
+    return "ok" if published else f"missing-{time.time_ns()}"
 
 
 rule stage_dataset:
@@ -115,6 +130,10 @@ rule stage_dataset:
     params:
         sink=lambda wc: SINK_SPECS[wc.sink],
         manifest=lambda wc: DATASETS_BY_NAME[wc.dataset],
+        # Read from the database while building the DAG. Not used by the
+        # script: a change (dataset dropped, or a wiped database restored)
+        # is what makes Snakemake re-run staging.
+        published=_published_state,
     threads: 2
     resources:
         duckdb_writer=1,

@@ -9,4 +9,9 @@ include: "rules/db_publish.smk"
 rule all:
     input:
         "results/.tables_published",
+        # Also request the table objects themselves: their existence is read
+        # from the database (storage plugin), so a table dropped or restored
+        # out of band re-runs stage_table + publish_tables even though the
+        # local sentinel above is up to date.
+        storage.sql_incremental(expand("{table}", table=TABLES)),
         expand("results/.datasets_published.{sink}", sink=SINKS) if config.get("datasets") else [],

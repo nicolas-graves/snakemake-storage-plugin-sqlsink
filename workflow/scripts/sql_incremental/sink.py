@@ -110,6 +110,10 @@ class Sink(Protocol):
     def current_update_id(self, dataset_name: str) -> str | None:
         """`update_id` of the published version, or None."""
 
+    def published_intact(self, manifest: DatasetMaterialization) -> bool:
+        """True if the objects of the published version are all still there
+        (a marker alone survives a table dropped out of band)."""
+
     def stage_contours(self, contour: ContourSource, con: duckdb.DuckDBPyConnection): ...
 
     def stage_facts(self, dataset: NormalizedDataset, con: duckdb.DuckDBPyConnection): ...
@@ -193,12 +197,12 @@ def stage(
     """Stage one dataset (contours, then facts) into `sink`.
 
     Nothing becomes visible until `publish`. A dataset whose `update_id` is
-    already the sink's published version is not re-checked: its receipts come
+    already the sink's published version (and its objects are all still there) is not re-checked: its receipts come
     back with status "current". Otherwise orphan facts are rejected *before*
     the sink writes anything, so no sink silently loses rows to the INNER
     join.
     """
-    is_current = sink.current_update_id(dataset.name) == dataset.update_id
+    is_current = sink.current_update_id(dataset.name) == dataset.update_id and sink.published_intact(dataset.manifest)
     with duckdb_session(threads, memory_limit, sink.spill_dir()) as con:
         if not is_current:
             check_no_orphans(con, dataset)
@@ -246,6 +250,21 @@ def make_sink(spec: dict) -> Sink:
         create_all(engine)  # a DuckDB file is created on first use: it needs its marker tables
         return SqlSink(engine)
     raise ValueError(f"unknown sink type {kind!r} (expected 'postgres' or 'duckdb')")
+
+
+def dataset_is_published(spec: dict, manifest: DatasetMaterialization) -> bool:
+    """Read-only: is `manifest`'s dataset published in the sink `spec` with
+    all its objects still in place? Snakemake evaluates this while building
+    the DAG (as a rule param), so a dataset dropped or wiped out of band
+    changes the param and re-runs its staging. The engine is disposed before
+    returning: a DuckDB file lock must not outlive the check."""
+    if spec.get("type") == "duckdb" and not os.path.exists(spec["path"]):
+        return False
+    sink = make_sink(spec)
+    try:
+        return sink.current_update_id(manifest.name) is not None and sink.published_intact(manifest)
+    finally:
+        sink.engine.dispose()
 
 
 def default_spill_dir() -> str:
