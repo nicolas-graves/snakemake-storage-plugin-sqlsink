@@ -17,7 +17,7 @@ import duckdb
 from sqlalchemy import Column, ForeignKeyConstraint, Index, MetaData, PrimaryKeyConstraint, Table, Text, inspect, select, text
 
 from . import metadata as meta_mod
-from .engine import bulk_load_streaming, ensure_schema, upsert_by_pk
+from .engine import advisory_lock, bulk_load_streaming, ensure_schema, upsert_by_pk
 from .fingerprint import LOADER_VERSION, TYPE_MAP_VERSION
 from .manifest import PART_COLUMN, DatasetMaterialization
 from .publish import publish_datasets
@@ -210,7 +210,16 @@ class SqlSink:
     def stage_contours(self, contour: ContourSource, con: duckdb.DuckDBPyConnection) -> ContourStageReceipt:
         """Stage the shared contour/dimension relation, independently of any
         one dataset's fact Parquet. Idempotent: a second dataset that shares
-        the same contour table and an unchanged contour Parquet is a no-op."""
+        the same contour table and an unchanged contour Parquet is a no-op.
+
+        Datasets sharing a contour table stage the same physical tables, and
+        the marker checks below are check-then-act, so concurrent stagings of
+        one contour table are serialized under an advisory lock."""
+        with self.engine.connect() as lock_conn:
+            with advisory_lock(lock_conn, f"snakemake_sql:stage_contours:{contour.manifest.contour_table}"):
+                return self._stage_contours(contour, con)
+
+    def _stage_contours(self, contour: ContourSource, con: duckdb.DuckDBPyConnection) -> ContourStageReceipt:
         engine, manifest = self.engine, contour.manifest
         contour_sha256 = contour.sha256
         published = fetch_contour_marker(engine, manifest.contour_table)

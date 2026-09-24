@@ -11,7 +11,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Iterator
 
-from sqlalchemy import Engine, Table, create_engine, insert, select, text, update
+from sqlalchemy import Engine, Table, create_engine, func, insert, select, text, update
 
 
 def make_engine(dsn: str, **kwargs) -> Engine:
@@ -86,6 +86,8 @@ def upsert_by_pk(conn, table: Table, pk_col: str, values: dict, now_col: str | N
         conn.execute(stmt)
         return
 
+    if now_col:
+        values = {**values, now_col: func.now()}
     pk_column = table.c[pk_col]
     existing = conn.execute(select(pk_column).where(pk_column == values[pk_col])).scalar_one_or_none()
     if existing is None:
@@ -100,6 +102,16 @@ def _lock_key_to_bigint(key: str) -> int:
     digest = hashlib.sha256(key.encode()).digest()[:8]
     value = int.from_bytes(digest, "big", signed=True)
     return value
+
+
+def _csv_rows(rows) -> str:
+    """CSV text for PostgreSQL `COPY ... (FORMAT csv)` that keeps NULL and the
+    empty string apart: NULL is an unquoted empty field (COPY's default NULL),
+    every other value is quoted, so `''` arrives as `""`, an empty string."""
+    out = []
+    for row in rows:
+        out.append(",".join("" if v is None else '"' + str(v).replace('"', '""') + '"' for v in row))
+    return "\n".join(out) + "\n" if out else ""
 
 
 def bulk_load(conn, table: Table, rows: list[dict]) -> None:
@@ -118,22 +130,15 @@ def bulk_load(conn, table: Table, rows: list[dict]) -> None:
 
 
 def _bulk_load_postgres_copy(conn, table: Table, rows: list[dict]) -> None:
-    import csv
-    import io
-
     columns = list(rows[0].keys())
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    for row in rows:
-        writer.writerow(row[c] for c in columns)
-    buf.seek(0)
+    payload = _csv_rows([row[c] for c in columns] for row in rows)
 
     raw_conn = conn.connection
     cursor = raw_conn.driver_connection.cursor() if hasattr(raw_conn, "driver_connection") else raw_conn.cursor()
     qualified = f'"{table.schema}"."{table.name}"' if table.schema else f'"{table.name}"'
     col_list = ", ".join(f'"{c}"' for c in columns)
     with cursor.copy(f"COPY {qualified} ({col_list}) FROM STDIN WITH (FORMAT csv)") as copy:
-        copy.write(buf.read())
+        copy.write(payload)
 
 
 def bulk_load_streaming(conn, table: Table, duckdb_cursor, columns: list[str], batch_size: int = 50_000) -> int:
@@ -149,9 +154,6 @@ def bulk_load_streaming(conn, table: Table, duckdb_cursor, columns: list[str], b
 
     Returns the total row count loaded.
     """
-    import csv
-    import io
-
     dialect = conn.engine.dialect.name
     total = 0
 
@@ -165,10 +167,7 @@ def bulk_load_streaming(conn, table: Table, duckdb_cursor, columns: list[str], b
                 batch = duckdb_cursor.fetchmany(batch_size)
                 if not batch:
                     break
-                buf = io.StringIO()
-                writer = csv.writer(buf)
-                writer.writerows(batch)
-                copy.write(buf.getvalue())
+                copy.write(_csv_rows(batch))
                 total += len(batch)
         return total
 

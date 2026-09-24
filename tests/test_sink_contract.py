@@ -168,3 +168,20 @@ def test_make_sink_builds_each_kind_and_rejects_unknown(tmp_path):
     assert isinstance(make_sink({"type": "duckdb", "path": str(tmp_path / "s.duckdb")}), SqlSink)
     with pytest.raises(ValueError):
         make_sink({"type": "csv"})
+
+
+def test_a_republished_marker_advances_its_timestamp(kit, paths):
+    sink, _ = kit
+    from sqlalchemy import select
+
+    from sql_incremental import metadata as meta_mod
+
+    def published_at():
+        with sink.engine.connect() as conn:
+            return conn.execute(select(meta_mod.analytics_dataset_updates.c.published_at)).scalar_one()
+
+    materialize(MANIFEST, str(paths["facts"]), str(paths["contours"]), sink)
+    first = published_at()
+    _rewrite_contours(paths, "('Z1','part-Z1-a'), ('Z1','part-Z1-b'), ('Z2','part-Z2-a'), ('Z2','part-Z2-b')")
+    materialize(MANIFEST, str(paths["facts"]), str(paths["contours"]), sink)
+    assert published_at() > first
