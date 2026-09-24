@@ -1,0 +1,12 @@
+configfile: "config/config.yaml"
+
+
+include: "rules/db_publish.smk"
+# include: "rules/parquet.smk"       # existing upstream Parquet generation (not in scope here)
+# include: "rules/downstream.smk"    # Superset registration / equivalence audit / smoke tests
+
+
+rule all:
+    input:
+        "results/.tables_published",
+        expand("results/.datasets_published.{sink}", sink=SINKS) if config.get("datasets") else [],

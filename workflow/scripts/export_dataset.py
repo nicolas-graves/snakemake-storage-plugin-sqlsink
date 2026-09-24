@@ -1,0 +1,11 @@
+"""Snakemake `script:` entrypoint for rule `export_dataset`: write the
+published version of one dataset to Parquet."""
+
+from sql_incremental.export import export_parquet
+from sql_incremental.manifest import load_manifest
+from sql_incremental.sink import make_sink
+
+sink = make_sink(snakemake.params.sink)  # noqa: F821
+manifest = load_manifest(snakemake.params.manifest)  # noqa: F821
+rows = export_parquet(sink, manifest, snakemake.output.parquet, threads=snakemake.threads)  # noqa: F821
+print(f"Exported {rows} row(s) of {manifest.name} to {snakemake.output.parquet}")  # noqa: F821

@@ -1,0 +1,161 @@
+tables:
+  - table_01
+  # ... full list of 37 table names goes here
+
+# PostgreSQL DSN (production sink). The local sink is a DuckDB file:
+# select it with `sinks: [duckdb]` and `duckdb_sink_path: results/sink.duckdb`.
+# `sinks:` defaults to [postgres]; list both to publish to both.
+db:
+  dsn: "postgresql+psycopg://user:pass@localhost:5432/analytics"
+
+loader_version: 1
+
+# Logical datasets published as a compact fact table + shared contour
+# table + public compatibility view instead of a plain 1:1 Parquet->table
+# copy (see docs/postgresql-geometry-normalization.md in cgdd-sevs-ecf).
+# Each entry is a sql_incremental.manifest.DatasetMaterialization, loaded via
+# manifest.load_manifest().
+#
+# Join columns and output_columns were read off the real Parquets (never
+# guessed from names) and each entry's equivalence -- published view ==
+# original expanded Parquet, as a multiset -- was verified on 2026-09-24
+# with workflow/scripts/verify_equivalence.py. output_columns must match the
+# Parquet's column names exactly: "Famille professionnelle (FAP\u00a02021/341)"
+# contains a non-breaking space. If a producer changes its columns, refresh
+# the list and re-run the equivalence check.
+datasets:
+  - name: ecarts_emploi_formation_ze
+    fact_source: ecarts_emploi_formation_ze
+    contour_source: zone_emploi_contours
+    contour_table: zone_emploi_contours
+    geometry_column: polygon_coords
+    fact_join_columns: ["Code ZE"]
+    contour_join_columns: ["Code ZE"]
+    compact_schema: analytics_storage
+    output_columns:
+      - "Code ZE"
+      - "Zone d'emploi"
+      - "Code ROME"
+      - "Métier"
+      - "Type"
+      - "Demandeurs d'emploi"
+      - "Offres d'emploi"
+      - "Ratio OE/DE"
+      - "Demandeurs d'emploi - région"
+      - "Offres d'emploi - région"
+      - "Ratio OE/DE - région"
+      - "Inadéquation géographique - région"
+      - "Sessions initiales (apprentissage inclus)"
+      - "Dont sessions en apprentissage"
+      - "Sessions continues"
+      - "Sessions FI/FC"
+      - "Sessions autres ou non renseignées"
+      - "Capacité Parcoursup"
+      - "Année Parcoursup"
+      - "Effectifs en année terminale - région"
+      - "Dont voie scolaire - région"
+      - "Dont apprentissage - région"
+      - "Période InserJeunes"
+      - "Ratio non calculable"
+      - "Région"
+      - "Zone"
+      - "Inadéquation géographique - national"
+      - "Famille professionnelle (FAP\u00a02021/341)"
+      - "sector_grain"
+      - "Secteur (A21)"
+      - "Secteur (A38)"
+      - "Secteur (A88)"
+      - "mass"
+      - "p_f21_given_sector"
+      - "p_f21_region"
+      - "location_quotient"
+      - "share_threshold"
+      - "lq_threshold"
+      - "mass_std"
+      - "mass_q025"
+      - "mass_q16"
+      - "mass_q50"
+      - "mass_q84"
+      - "mass_q975"
+      - "is_characteristic"
+      - "polygon_coords"
+  - name: ecarts_emploi_formation_ze_fap2021_sgpe
+    fact_source: ecarts_emploi_formation_ze_fap2021_sgpe
+    contour_source: zone_emploi_contours
+    contour_table: zone_emploi_contours
+    geometry_column: polygon_coords
+    fact_join_columns: ["Code ZE"]
+    contour_join_columns: ["Code ZE"]
+    compact_schema: analytics_storage
+    output_columns:
+      - "Code ZE"
+      - "Zone d'emploi"
+      - "Code ROME"
+      - "Métier"
+      - "Type"
+      - "Demandeurs d'emploi"
+      - "Offres d'emploi"
+      - "Ratio OE/DE"
+      - "Demandeurs d'emploi - région"
+      - "Offres d'emploi - région"
+      - "Ratio OE/DE - région"
+      - "Inadéquation géographique - région"
+      - "Sessions initiales (apprentissage inclus)"
+      - "Dont sessions en apprentissage"
+      - "Sessions continues"
+      - "Sessions FI/FC"
+      - "Sessions autres ou non renseignées"
+      - "Capacité Parcoursup"
+      - "Année Parcoursup"
+      - "Effectifs en année terminale - région"
+      - "Dont voie scolaire - région"
+      - "Dont apprentissage - région"
+      - "Période InserJeunes"
+      - "Ratio non calculable"
+      - "Région"
+      - "Zone"
+      - "Inadéquation géographique - national"
+      - "Famille professionnelle (FAP\u00a02021/341)"
+      - "polygon_coords"
+      - "Thématique stratégique (SGPE)"
+      - "Secteur stratégique (SGPE)"
+      - "Sous-secteur stratégique (SGPE)"
+  - name: formation_initiale_fap_maps
+    fact_source: formation_initiale_fap_maps
+    contour_source: zone_emploi_contours
+    contour_table: zone_emploi_contours
+    geometry_column: polygon_coords
+    fact_join_columns: ["Code ZE"]
+    contour_join_columns: ["Code ZE"]
+    compact_schema: analytics_storage
+    output_columns:
+      - "Code ZE"
+      - "Zone d'emploi"
+      - "polygon_coords"
+      - "FAP341"
+      - "Intitulé FAP341"
+      - "Valeur"
+      - "Indicateur"
+      - "Maille de la valeur"
+      - "Région"
+  - name: formation_initiale_fap_maps_fap2021_sgpe
+    fact_source: formation_initiale_fap_maps_fap2021_sgpe
+    contour_source: zone_emploi_contours
+    contour_table: zone_emploi_contours
+    geometry_column: polygon_coords
+    fact_join_columns: ["Code ZE"]
+    contour_join_columns: ["Code ZE"]
+    compact_schema: analytics_storage
+    output_columns:
+      - "Code ZE"
+      - "Zone d'emploi"
+      - "polygon_coords"
+      - "FAP341"
+      - "Intitulé FAP341"
+      - "Valeur"
+      - "Indicateur"
+      - "Maille de la valeur"
+      - "Région"
+      - "Thématique stratégique (SGPE)"
+      - "Secteur stratégique (SGPE)"
+      - "Sous-secteur stratégique (SGPE)"
