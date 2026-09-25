@@ -16,7 +16,7 @@ from sqlalchemy import Column, MetaData, Table, inspect, select
 from . import metadata as meta_mod
 from .engine import bulk_load, upsert_by_pk
 from .fingerprint import LOADER_VERSION, TYPE_MAP_VERSION, compute_update_id_for_file
-from .queries import read_parquet_sql
+from .queries import fetch_row, read_parquet_sql
 
 
 @dataclass
@@ -41,16 +41,12 @@ def _read_parquet_schema_and_stats(parquet_path: str) -> tuple[list[tuple[str, s
     con = duckdb.connect()
     try:
         rel = con.sql(f"SELECT * FROM {read_parquet_sql(parquet_path)}")
-        columns = list(zip(rel.columns, rel.types))
-        row_count = con.sql(
-            f"SELECT count(*) FROM {read_parquet_sql(parquet_path)}"
-        ).fetchone()[0]
+        columns = [(name, str(typ)) for name, typ in zip(rel.columns, rel.types)]
+        row_count = fetch_row(con, f"SELECT count(*) FROM {read_parquet_sql(parquet_path)}")[0]
         null_exprs = ", ".join(
             f'count(*) FILTER (WHERE "{name}" IS NULL) AS "{name}"' for name, _ in columns
         )
-        null_row = con.sql(
-            f"SELECT {null_exprs} FROM {read_parquet_sql(parquet_path)}"
-        ).fetchone()
+        null_row = fetch_row(con, f"SELECT {null_exprs} FROM {read_parquet_sql(parquet_path)}")
         null_counts = dict(zip((name for name, _ in columns), null_row)) if columns else {}
         return columns, row_count, null_counts
     finally:

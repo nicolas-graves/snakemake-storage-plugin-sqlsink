@@ -67,7 +67,7 @@ def _now() -> str:
 
 def _duckdb_schema(con: duckdb.DuckDBPyConnection, sql: str) -> list[tuple[str, str]]:
     rel = con.sql(sql)
-    return list(zip(rel.columns, rel.types))
+    return [(name, str(typ)) for name, typ in zip(rel.columns, rel.types)]
 
 
 def _table_object_for(name: str, columns: list[tuple[str, str]], schema: str | None = None) -> Table:

@@ -9,9 +9,19 @@ same `JoinSpec`.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
+
+import duckdb
 
 from .join import physical_join_spec, render_join_sql
 from .manifest import PART_COLUMN, DatasetMaterialization
+
+
+def fetch_row(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[Any, ...]:
+    """The single row of an aggregate query (which always returns one)."""
+    row = con.execute(sql).fetchone()
+    assert row is not None, f"query returned no row: {sql}"
+    return row
 
 
 def read_parquet_sql(path: str) -> str:

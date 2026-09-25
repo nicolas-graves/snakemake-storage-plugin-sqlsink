@@ -23,7 +23,7 @@ from . import metadata as meta_mod
 from .fingerprint import sha256_file
 from .join import Relation, join_spec, render_join_sql
 from .manifest import DatasetMaterialization
-from .queries import contour_columns, read_parquet_sql
+from .queries import contour_columns, fetch_row, read_parquet_sql
 from .sink import OrphanFactsError, check_no_orphans, duckdb_session, normalize  # noqa: F401
 
 
@@ -60,7 +60,7 @@ def _copy_atomic(
     escaped = str(tmp).replace("'", "''")
     try:
         con.execute(f"COPY ({query}) TO '{escaped}' (FORMAT PARQUET, COMPRESSION ZSTD{options})")
-        rows = con.execute(f"SELECT COUNT(*) FROM {read_parquet_sql(str(tmp))}").fetchone()[0]
+        rows = fetch_row(con, f"SELECT COUNT(*) FROM {read_parquet_sql(str(tmp))}")[0]
         os.replace(tmp, out)
     finally:
         if tmp.exists():

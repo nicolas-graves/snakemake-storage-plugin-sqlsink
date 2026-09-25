@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 import duckdb
 
 from .manifest import DatasetMaterialization
+from .queries import fetch_row
 
 
 @dataclass
@@ -95,8 +96,8 @@ def compare_batched(
     for index in range(0, len(keys), batch_size):
         batch = keys[index : index + batch_size]
         in_list = ", ".join(_literal(k) for k in batch)
-        original = con.execute(sql.replace("@RELATION@", original_relation).replace("@KEYS@", in_list)).fetchone()
-        view = con.execute(sql.replace("@RELATION@", view_relation).replace("@KEYS@", in_list)).fetchone()
+        original = fetch_row(con, sql.replace("@RELATION@", original_relation).replace("@KEYS@", in_list))
+        view = fetch_row(con, sql.replace("@RELATION@", view_relation).replace("@KEYS@", in_list))
         original_total[0] += original[0]
         original_total[1] += original[1]
         view_total[0] += view[0]
@@ -112,12 +113,12 @@ def compare_batched(
         f"SELECT COUNT(*), COALESCE(SUM(CAST(hash({hashed}) AS HUGEINT)), 0) "
         f"FROM @RELATION@ WHERE {key} IS NULL"
     )
-    null_original = tuple(con.execute(null_sql.replace("@RELATION@", original_relation)).fetchone())
-    null_view = tuple(con.execute(null_sql.replace("@RELATION@", view_relation)).fetchone())
+    null_original = fetch_row(con, null_sql.replace("@RELATION@", original_relation))
+    null_view = fetch_row(con, null_sql.replace("@RELATION@", view_relation))
     return EquivalenceResult(
         dataset=dataset,
-        original=tuple(original_total),
-        view=tuple(view_total),
+        original=(original_total[0], original_total[1]),
+        view=(view_total[0], view_total[1]),
         batches=total,
         mismatched_batches=mismatched,
         peak_rss_mb=_peak_rss_mb(),

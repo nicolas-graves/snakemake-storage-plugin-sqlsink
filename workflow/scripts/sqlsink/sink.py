@@ -24,10 +24,11 @@ from pathlib import Path
 from typing import Iterator, Protocol
 
 import duckdb
+from sqlalchemy import Engine
 
 from .fingerprint import compute_dataset_update_id, sha256_source
 from .manifest import DatasetMaterialization
-from .queries import ArrowSource, bind_sources, compact_select_sql, contour_select_sql
+from .queries import ArrowSource, bind_sources, compact_select_sql, contour_select_sql, fetch_row
 
 
 class OrphanFactsError(ValueError):
@@ -116,12 +117,20 @@ def normalize(
     )
 
 
+class Receipt(Protocol):
+    status: str
+    row_count: int
+
+    def to_dict(self) -> dict: ...
+
+
 class Sink(Protocol):
     """Where a normalized dataset goes. Receipts are objects exposing
     `status` (`"current"` | `"staged"`), `row_count` and `to_dict()`;
     `publish` takes them as dicts, as stored between Snakemake rules."""
 
     name: str
+    engine: Engine
     # True when the sink keeps the source column types exactly (files);
     # False when it maps them through another type system (SQL database).
     preserves_types: bool
@@ -136,9 +145,9 @@ class Sink(Protocol):
         """True if the objects of the published version are all still there
         (a marker alone survives a table dropped out of band)."""
 
-    def stage_contours(self, contour: ContourSource, con: duckdb.DuckDBPyConnection): ...
+    def stage_contours(self, contour: ContourSource, con: duckdb.DuckDBPyConnection) -> Receipt: ...
 
-    def stage_facts(self, dataset: NormalizedDataset, con: duckdb.DuckDBPyConnection): ...
+    def stage_facts(self, dataset: NormalizedDataset, con: duckdb.DuckDBPyConnection) -> Receipt: ...
 
     def publish(
         self,
@@ -191,7 +200,7 @@ def orphan_count(con: duckdb.DuckDBPyConnection, dataset: NormalizedDataset) -> 
         f"SELECT COUNT(*) FROM ({dataset.compact_query}) f "
         f"ANTI JOIN ({dataset.contour_query}) c ON {on}"
     )
-    return con.execute(sql).fetchone()[0]
+    return fetch_row(con, sql)[0]
 
 
 def check_no_orphans(con: duckdb.DuckDBPyConnection, dataset: NormalizedDataset) -> None:
@@ -205,8 +214,8 @@ def check_no_orphans(con: duckdb.DuckDBPyConnection, dataset: NormalizedDataset)
 
 @dataclass
 class StageResult:
-    contour: object
-    dataset: object
+    contour: Receipt
+    dataset: Receipt
 
 
 def stage(

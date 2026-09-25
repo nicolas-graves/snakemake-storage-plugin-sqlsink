@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from typing import Any
 
 LOADER_VERSION = 1
 TYPE_MAP_VERSION = 2  # 2: DOUBLE -> sa.Double (was FLOAT: float32 on DuckDB), unmapped types raise
@@ -189,7 +190,7 @@ def published_marker(engine, name: str, kind: str | None = None) -> dict | None:
         with engine.connect() as conn:
             row = conn.execute(select(table).where(table.c[key] == name)).mappings().first()
         if row is not None:
-            out = {"kind": k}
+            out: dict[str, Any] = {"kind": k}
             for col, value in row.items():
                 if col != key:
                     out[col] = _iso(value) if col == "published_at" else value
