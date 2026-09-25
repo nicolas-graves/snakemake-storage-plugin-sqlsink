@@ -19,7 +19,8 @@ from .queries import (  # noqa: F401 (re-exported)
     read_parquet_sql,
     view_select_sql,
 )
-from .sink import contour_source, duckdb_session, normalize
+from .queries import bind_sources
+from .sink import bind_dataset, contour_source, duckdb_session, normalize
 from .sink_postgres import (  # noqa: F401 (re-exported)
     ContourStageReceipt,
     DatasetStageReceipt,
@@ -34,8 +35,10 @@ from .sink_postgres import (  # noqa: F401 (re-exported)
 def stage_contours(engine, manifest: DatasetMaterialization, contour_parquet_path: str) -> ContourStageReceipt:
     """Stage the shared contour relation into the SQL database."""
     sink = SqlSink(engine)
+    contour = contour_source(manifest, contour_parquet_path)
     with duckdb_session(None, None, sink.spill_dir()) as con:
-        return sink.stage_contours(contour_source(manifest, contour_parquet_path), con)
+        bind_sources(con, contour.path)
+        return sink.stage_contours(contour, con)
 
 
 def stage_dataset(
@@ -48,4 +51,5 @@ def stage_dataset(
     sink = SqlSink(engine)
     dataset = normalize(manifest, fact_parquet_path, contour_parquet_path)
     with duckdb_session(None, None, sink.spill_dir()) as con:
+        bind_dataset(con, dataset)
         return sink.stage_facts(dataset, con)

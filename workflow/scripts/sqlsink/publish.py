@@ -12,12 +12,15 @@ partial rename or a stale marker row behind.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 
 from sqlalchemy import inspect, select, text
 
 from . import metadata as meta_mod
 from .engine import advisory_lock, upsert_by_pk
 from .manifest import DatasetMaterialization
+
+log = logging.getLogger(__name__)
 
 PUBLISH_LOCK_KEY = "snakemake_sql:publish_tables"
 
@@ -102,7 +105,7 @@ def _drop_old_tables(engine, old_names: list[str]) -> None:
                 conn.execute(text(f'DROP TABLE IF EXISTS "{name}"'))
         except Exception:
             # Non-fatal: leftover table, cleaned up on a later run/sweep.
-            pass
+            log.warning("could not drop leftover table %s", name, exc_info=True)
 
 
 def publish_datasets(
@@ -287,4 +290,4 @@ def _drop_old_tables_qualified(engine, old_physical: list[tuple[str, str | None]
                 conn.execute(text(f"DROP TABLE IF EXISTS {ref}"))
         except Exception:
             # Non-fatal: leftover table, cleaned up on a later run/sweep.
-            pass
+            log.warning("could not drop leftover table %s", ref, exc_info=True)

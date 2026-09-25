@@ -25,9 +25,9 @@ from typing import Iterator, Protocol
 
 import duckdb
 
-from .fingerprint import compute_dataset_update_id, sha256_file
+from .fingerprint import compute_dataset_update_id, sha256_source
 from .manifest import DatasetMaterialization
-from .queries import compact_select_sql, contour_select_sql
+from .queries import ArrowSource, bind_sources, compact_select_sql, contour_select_sql
 
 
 class OrphanFactsError(ValueError):
@@ -41,7 +41,7 @@ class ContourSource:
     dataset's facts (several datasets may share one contour table)."""
 
     manifest: DatasetMaterialization
-    path: str
+    path: "str | ArrowSource"
     sha256: str
 
     @property
@@ -56,7 +56,7 @@ class NormalizedDataset:
     loader": it changes when the facts, the contours or the manifest do."""
 
     manifest: DatasetMaterialization
-    fact_path: str
+    fact_path: "str | ArrowSource"
     fact_sha256: str
     contour: ContourSource
     update_id: str
@@ -74,20 +74,42 @@ class NormalizedDataset:
         return self.contour.query
 
 
-def contour_source(manifest: DatasetMaterialization, contour_parquet_path: str) -> ContourSource:
-    return ContourSource(manifest, contour_parquet_path, sha256_file(contour_parquet_path))
+def as_source(value, name: str):
+    """A Parquet path stays a path; a `pyarrow.Table` (or a pandas
+    DataFrame) becomes an `ArrowSource` registered under `name`."""
+    if isinstance(value, (str, os.PathLike)):
+        return str(value)
+    if isinstance(value, ArrowSource):
+        return value
+    import pyarrow as pa
+
+    if not isinstance(value, pa.Table):
+        value = pa.Table.from_pandas(value, preserve_index=False)
+    return ArrowSource(value, name)
+
+
+def contour_source(manifest: DatasetMaterialization, contour_parquet_path) -> ContourSource:
+    source = as_source(contour_parquet_path, f"__contour__{manifest.contour_table}")
+    return ContourSource(manifest, source, sha256_source(source))
+
+
+def bind_dataset(con: duckdb.DuckDBPyConnection, dataset: NormalizedDataset) -> None:
+    """Register the in-memory sources of `dataset` (facts, contours) on `con`."""
+    bind_sources(con, dataset.fact_path, dataset.contour.path)
 
 
 def normalize(
-    manifest: DatasetMaterialization, fact_parquet_path: str, contour_parquet_path: str
+    manifest: DatasetMaterialization, fact_parquet_path, contour_parquet_path
 ) -> NormalizedDataset:
-    """Fingerprint the two source Parquets and bind them to the manifest.
-    Reads the files once to hash them; nothing is written anywhere."""
+    """Fingerprint the two sources (Parquet paths or Arrow tables) and bind
+    them to the manifest. Reads a file once to hash it; nothing is written
+    anywhere."""
     contour = contour_source(manifest, contour_parquet_path)
-    fact_sha256 = sha256_file(fact_parquet_path)
+    fact = as_source(fact_parquet_path, f"__facts__{manifest.name}")
+    fact_sha256 = sha256_source(fact)
     return NormalizedDataset(
         manifest=manifest,
-        fact_path=fact_parquet_path,
+        fact_path=fact,
         fact_sha256=fact_sha256,
         contour=contour,
         update_id=compute_dataset_update_id(manifest.manifest_hash(), fact_sha256, contour.sha256),
@@ -204,6 +226,7 @@ def stage(
     """
     is_current = sink.current_update_id(dataset.name) == dataset.update_id and sink.published_intact(dataset.manifest)
     with duckdb_session(threads, memory_limit, sink.spill_dir()) as con:
+        bind_dataset(con, dataset)
         if not is_current:
             check_no_orphans(con, dataset)
         contour_receipt = sink.stage_contours(dataset.contour, con)
@@ -221,8 +244,8 @@ def publish(sink: Sink, manifests: list[DatasetMaterialization], results: list[S
 
 def materialize(
     manifest: DatasetMaterialization,
-    fact_parquet_path: str,
-    contour_parquet_path: str,
+    fact_parquet_path,
+    contour_parquet_path,
     sink: Sink,
     *,
     threads: int | None = 2,
@@ -236,7 +259,9 @@ def materialize(
 
 def make_sink(spec: dict) -> Sink:
     """Build a sink from a config mapping: `{"type": "postgres", "dsn": ...}`
-    or `{"type": "duckdb", "path": ...}`."""
+    or `{"type": "duckdb", "path": ...}`. A DuckDB spec may add
+    `"schema": "public"`: the default schema (created if missing) of every
+    connection, so views and markers land there rather than in `main`."""
     kind = spec.get("type")
     if kind in ("postgres", "duckdb"):
         from .engine import make_engine
@@ -247,9 +272,22 @@ def make_sink(spec: dict) -> Sink:
         from .metadata import create_all
 
         engine = make_engine(f"duckdb:///{spec['path']}")
+        if spec.get("schema"):
+            _default_schema(engine, spec["schema"])
         create_all(engine)  # a DuckDB file is created on first use: it needs its marker tables
-        return SqlSink(engine)
+        return SqlSink(engine, view_schema=spec.get("schema"))
     raise ValueError(f"unknown sink type {kind!r} (expected 'postgres' or 'duckdb')")
+
+
+def _default_schema(engine, schema: str) -> None:
+    from sqlalchemy import event
+
+    quoted = '"' + schema.replace('"', '""') + '"'
+
+    @event.listens_for(engine, "connect")
+    def _use_schema(dbapi_connection, _record):
+        dbapi_connection.execute(f"CREATE SCHEMA IF NOT EXISTS {quoted}")
+        dbapi_connection.execute(f"SET schema = {_sql_string(schema)}")
 
 
 def dataset_is_published(spec: dict, manifest: DatasetMaterialization) -> bool:

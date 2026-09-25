@@ -16,6 +16,7 @@ from sqlalchemy import Column, MetaData, Table, inspect, select
 from . import metadata as meta_mod
 from .engine import bulk_load, upsert_by_pk
 from .fingerprint import LOADER_VERSION, TYPE_MAP_VERSION, compute_update_id_for_file
+from .queries import read_parquet_sql
 
 
 @dataclass
@@ -39,16 +40,16 @@ class StageReceipt:
 def _read_parquet_schema_and_stats(parquet_path: str) -> tuple[list[tuple[str, str]], int, dict]:
     con = duckdb.connect()
     try:
-        rel = con.sql(f"SELECT * FROM read_parquet('{parquet_path}')")
+        rel = con.sql(f"SELECT * FROM {read_parquet_sql(parquet_path)}")
         columns = list(zip(rel.columns, rel.types))
         row_count = con.sql(
-            f"SELECT count(*) FROM read_parquet('{parquet_path}')"
+            f"SELECT count(*) FROM {read_parquet_sql(parquet_path)}"
         ).fetchone()[0]
         null_exprs = ", ".join(
             f'count(*) FILTER (WHERE "{name}" IS NULL) AS "{name}"' for name, _ in columns
         )
         null_row = con.sql(
-            f"SELECT {null_exprs} FROM read_parquet('{parquet_path}')"
+            f"SELECT {null_exprs} FROM {read_parquet_sql(parquet_path)}"
         ).fetchone()
         null_counts = dict(zip((name for name, _ in columns), null_row)) if columns else {}
         return columns, row_count, null_counts
@@ -56,10 +57,15 @@ def _read_parquet_schema_and_stats(parquet_path: str) -> tuple[list[tuple[str, s
         con.close()
 
 
+# `sa.Float` renders FLOAT, which is 4 bytes on DuckDB (8 on PostgreSQL): a
+# DOUBLE must map to `sa.Double`, or a DuckDB sink silently rounds to float32.
 _DUCKDB_TO_SA = {
     "BIGINT": "BigInteger",
     "INTEGER": "Integer",
-    "DOUBLE": "Float",
+    "SMALLINT": "SmallInteger",
+    "TINYINT": "SmallInteger",
+    "DOUBLE": "Double",
+    "FLOAT": "REAL",
     "VARCHAR": "Text",
     "BOOLEAN": "Boolean",
     "DATE": "Date",
@@ -177,7 +183,7 @@ def stage_table(engine, table_name: str, parquet_path: str, extra_config: dict |
         staging_table.create(conn)
         con = duckdb.connect()
         try:
-            rows = con.sql(f"SELECT * FROM read_parquet('{parquet_path}')").fetchall()
+            rows = con.sql(f"SELECT * FROM {read_parquet_sql(parquet_path)}").fetchall()
             col_names = [c[0] for c in columns]
         finally:
             con.close()

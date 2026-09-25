@@ -76,7 +76,9 @@ def _table_object_for(name: str, columns: list[tuple[str, str]], schema: str | N
     md = MetaData()
     cols = []
     for col_name, duck_type in columns:
-        sa_type_name = _DUCKDB_TO_SA.get(str(duck_type), "Text")
+        sa_type_name = _DUCKDB_TO_SA.get(str(duck_type))
+        if sa_type_name is None:
+            raise TypeError(f"column {col_name!r}: no SQL type mapping for DuckDB type {duck_type}")
         cols.append(Column(col_name, getattr(sa, sa_type_name), autoincrement=False))
     return Table(name, md, *cols, schema=schema)
 
@@ -196,9 +198,11 @@ class SqlSink:
     preserves_types = False
     name = "sql"
 
-    def __init__(self, engine, *, view_schema: str = "public"):
+    def __init__(self, engine, *, view_schema: str | None = None):
         self.engine = engine
-        self.view_schema = view_schema
+        # PostgreSQL views live in `public`; on DuckDB they live in the
+        # connection's default schema unless the sink spec names one.
+        self.view_schema = view_schema or ("public" if engine.dialect.name == "postgresql" else None)
 
     def spill_dir(self) -> str:
         return default_spill_dir()
@@ -221,7 +225,7 @@ class SqlSink:
             bare.append(manifest.zone_table)
         return all(self._has_table(b, manifest) for b in bare) and manifest.name in inspect(
             self.engine
-        ).get_view_names()
+        ).get_view_names(schema=self.view_schema)
 
     def stage_contours(self, contour: ContourSource, con: duckdb.DuckDBPyConnection) -> ContourStageReceipt:
         """Stage the shared contour/dimension relation, independently of any

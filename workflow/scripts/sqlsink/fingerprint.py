@@ -10,7 +10,7 @@ import hashlib
 import json
 
 LOADER_VERSION = 1
-TYPE_MAP_VERSION = 1
+TYPE_MAP_VERSION = 2  # 2: DOUBLE -> sa.Double (was FLOAT: float32 on DuckDB), unmapped types raise
 
 
 def sha256_file(path: str) -> str:
@@ -19,6 +19,57 @@ def sha256_file(path: str) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def sha256_arrow(table) -> str:
+    """Content hash of an in-memory Arrow table (schema + rows, chunk-layout
+    independent): the IPC stream of the table, hashed as it is written."""
+    import pyarrow as pa
+
+    class _Hasher:
+        def __init__(self):
+            self.h = hashlib.sha256()
+            self.pos = 0
+
+        def write(self, data):
+            self.h.update(data)
+            self.pos += len(data)
+            return len(data)
+
+        def flush(self):
+            pass
+
+        def tell(self):
+            return self.pos
+
+        def close(self):
+            pass
+
+        closed = False
+
+        def writable(self):
+            return True
+
+        def seekable(self):
+            return False
+
+        def readable(self):
+            return False
+
+    sink = _Hasher()
+    combined = table.combine_chunks()
+    with pa.ipc.new_stream(pa.PythonFile(sink, mode="w"), combined.schema) as writer:
+        writer.write_table(combined)
+    return sink.h.hexdigest()
+
+
+def sha256_source(source) -> str:
+    """Fingerprint of a source: a Parquet file path, or an `ArrowSource`."""
+    from .queries import ArrowSource
+
+    if isinstance(source, ArrowSource):
+        return sha256_arrow(source.table)
+    return sha256_file(source)
 
 
 def compute_update_id(
