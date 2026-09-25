@@ -1,7 +1,8 @@
 """Content-derived identity for a published table.
 
 Pure functions, no DB or Snakemake dependency, so they can be unit-tested
-in isolation and reused by the one-off seeding script.
+in isolation and reused by the one-off seeding script. `fingerprint` at the
+end is the exception: it reads a live database (lazy imports).
 """
 
 from __future__ import annotations
@@ -160,3 +161,86 @@ def compute_dataset_update_id_for_files(
         type_map_version=type_map_version,
     )
     return update_id, fact_sha256, contour_sha256
+
+
+def _split_relation(relation: str) -> tuple[str | None, str]:
+    schema, _, name = relation.rpartition(".")
+    return (schema or None), name
+
+
+def _iso(value) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def published_marker(engine, name: str, kind: str | None = None) -> dict | None:
+    """The publish marker row of relation `name` (a table, else a dataset,
+    else a contour table; only `kind` if given), reduced to JSON-safe change-token fields."""
+    from sqlalchemy import select
+
+    from . import metadata as meta_mod
+
+    for k, table, key in (
+        ("table", meta_mod.analytics_table_updates, "table_name"),
+        ("dataset", meta_mod.analytics_dataset_updates, "dataset_name"),
+        ("contour", meta_mod.contour_updates, "contour_table"),
+    ):
+        if kind not in (None, k):
+            continue
+        with engine.connect() as conn:
+            row = conn.execute(select(table).where(table.c[key] == name)).mappings().first()
+        if row is not None:
+            out = {"kind": k}
+            for col, value in row.items():
+                if col != key:
+                    out[col] = _iso(value) if col == "published_at" else value
+            return out
+    return None
+
+
+def fingerprint(engine, relations, *, count_rows=True) -> dict:
+    """Deterministic state fingerprint of `relations` ("name" or "schema.name").
+
+    Neither PostgreSQL nor DuckDB exposes a cheap per-table mtime or content
+    checksum, so the authoritative change token is the plugin's marker row
+    (source checksum, row count, `published_at`). It is combined with cheap
+    probes: a hash of the column names/types, optionally `count(*)` (a scan
+    on PostgreSQL: pass `count_rows=False`, or a set of relation names to
+    count, for large tables) and, on PostgreSQL, `pg_relation_size` and
+    `pg_class.relfilenode` (which changes on TRUNCATE/VACUUM FULL/CLUSTER).
+    No wall-clock value other than the marker's `published_at`, so the same
+    database state always yields the same `fingerprint_json` bytes. Accepted
+    limit: an out-of-band UPDATE that keeps row count, size and relfilenode
+    is not detected until the table is restaged.
+    """
+    from sqlalchemy import inspect, text
+
+    dialect = engine.dialect.name
+    inspector = inspect(engine)
+    out: dict = {}
+    for relation in sorted(set(relations)):
+        schema, name = _split_relation(relation)
+        entry: dict = {"marker": published_marker(engine, name)}
+        exists = inspector.has_table(name, schema=schema) or name in inspector.get_view_names(schema=schema)
+        entry["exists"] = exists
+        if exists:
+            cols = [[c["name"], str(c["type"])] for c in inspector.get_columns(name, schema=schema)]
+            entry["columns_sha256"] = hashlib.sha256(json.dumps(cols).encode()).hexdigest()
+            ref = f'"{schema}"."{name}"' if schema else f'"{name}"'
+            if count_rows is True or (count_rows and relation in count_rows):
+                with engine.connect() as conn:
+                    entry["row_count"] = conn.execute(text(f"SELECT count(*) FROM {ref}")).scalar_one()
+            if dialect == "postgresql":
+                with engine.connect() as conn:
+                    row = conn.execute(
+                        text("SELECT pg_relation_size(c.oid), c.relfilenode FROM pg_class c WHERE c.oid = to_regclass(:ref)"),
+                        {"ref": ref},
+                    ).first()
+                if row is not None:
+                    entry["relation_size"], entry["relfilenode"] = int(row[0]), int(row[1])
+        out[relation] = entry
+    return out
+
+
+def fingerprint_json(engine, relations, **kwargs) -> str:
+    """Byte-stable serialization of `fingerprint`."""
+    return json.dumps(fingerprint(engine, relations, **kwargs), sort_keys=True, indent=2, default=str) + "\n"

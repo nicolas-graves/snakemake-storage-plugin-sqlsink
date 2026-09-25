@@ -17,8 +17,8 @@ so `publish_tables` sees a receipt for every table regardless of whether
 `stage_table` actually ran for it this session.
 
 Downstream rules (Superset registration, equivalence audit, smoke tests)
-should depend on `results/.db_published`, not on any individual table's
-receipt.
+should depend on the `published/{table}` storage objects, not on any
+individual table's staging receipt.
 
 This module is written against SQLAlchemy Core throughout (see
 `workflow/scripts/sqlsink/`), so `config["db"]["dsn"]` can point at
@@ -65,7 +65,7 @@ rule publish_tables:
     input:
         receipts=storage.sqlsink(expand("{table}", table=TABLES)),
     output:
-        touch("results/.tables_published"),
+        published=storage.sqlsink(expand("published/{table}", table=TABLES)),
     params:
         dsn=config["db"]["dsn"],
     script:
