@@ -119,3 +119,21 @@ def test_double_columns_keep_full_precision_in_the_duckdb_sink(tmp_path):
         assert types["count"] in ("SMALLINT",)
     finally:
         con.close()
+
+
+def test_duckdb_staging_loads_arrow_batches(tmp_path):
+    """bulk_load_streaming on DuckDB moves Arrow batches (no per-row inserts) and keeps every row."""
+    import duckdb
+    import sqlalchemy as sa
+    from sqlsink.engine import bulk_load_streaming
+
+    engine = sa.create_engine(f"duckdb:///{tmp_path / 't.duckdb'}")
+    table = sa.Table("t", sa.MetaData(), sa.Column("k", sa.BigInteger), sa.Column("v", sa.Text))
+    src = duckdb.connect()
+    cursor = src.execute("SELECT range AS k, 'row ' || range AS v FROM range(25000)")
+    with engine.begin() as conn:
+        table.create(conn)
+        total = bulk_load_streaming(conn, table, cursor, ["k", "v"], batch_size=4000)
+        assert total == 25000
+        assert conn.execute(sa.text("SELECT count(*), sum(k), max(v) FROM t")).one() == (25000, 312487500, "row 9999")
+    engine.dispose()

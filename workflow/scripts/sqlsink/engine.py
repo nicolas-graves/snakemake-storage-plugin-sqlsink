@@ -150,7 +150,7 @@ def bulk_load_streaming(conn, table: Table, duckdb_cursor, columns: list[str], b
     PostgreSQL: each batch is streamed straight into one `COPY ... FROM
     STDIN` (a single COPY call spanning all batches, so it's still one
     server-side operation) rather than building one giant CSV buffer up
-    front. Other dialects: a batched `INSERT`, same bound.
+    front. DuckDB: Arrow batches inserted with `INSERT ... SELECT`. Other dialects: a batched `INSERT`, same bound.
 
     Returns the total row count loaded.
     """
@@ -169,6 +169,28 @@ def bulk_load_streaming(conn, table: Table, duckdb_cursor, columns: list[str], b
                     break
                 copy.write(_csv_rows(batch))
                 total += len(batch)
+        return total
+
+    if dialect == "duckdb":
+        # Arrow batches into the engine's own connection (same transaction as
+        # the staging table's DDL): no per-row Python objects, no per-row insert.
+        import pyarrow as pa
+
+        raw = conn.connection.driver_connection
+        qualified = f'"{table.schema}"."{table.name}"' if table.schema else f'"{table.name}"'
+        col_list = ", ".join(f'"{c}"' for c in columns)
+        reader = (
+            duckdb_cursor.to_arrow_reader(batch_size)
+            if hasattr(duckdb_cursor, "to_arrow_reader")
+            else duckdb_cursor.fetch_record_batch(batch_size)
+        )
+        for batch in reader:
+            raw.register("__sqlsink_batch", pa.Table.from_batches([batch]))
+            try:
+                raw.execute(f"INSERT INTO {qualified} ({col_list}) SELECT * FROM __sqlsink_batch")
+            finally:
+                raw.unregister("__sqlsink_batch")
+            total += batch.num_rows
         return total
 
     while True:
