@@ -16,7 +16,6 @@ actual rows -- retrieving/storing it is therefore cheap regardless of table
 size.
 """
 
-from __future__ import annotations
 
 import json
 import re
