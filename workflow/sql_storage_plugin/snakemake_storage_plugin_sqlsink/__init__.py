@@ -15,8 +15,16 @@ Queries select the kind of object:
 This does NOT replace `sqlsink.publish.publish_tables`: the storage
 plugin interface has no notion of a transaction spanning several storage
 objects, so atomic multi-table publication stays a separate final rule, as
-before, whose outputs are the `published/{table}` objects. See
-`workflow/rules/db_publish.smk`.
+before, whose outputs are the `published/{table}` objects. Call it with
+`refresh=True`: Snakemake compares each input with the *oldest* output of a
+job, so outputs whose marker `published_at` (their mtime) was left at an older
+publish time would make the job rerun forever; `refresh` stamps every marker of
+the job identically. Receipts omit the timestamp, so they stay byte-stable.
+See `workflow/rules/db_publish.smk`.
+
+Snakemake only rechecks a storage object's `exists()` for target jobs, so
+drift of an intermediate object (e.g. a revoked grant) is not seen; guard such
+a rule with a param computed from `sqlsink.grants.role_has_select` instead.
 
 The "local materialization" of a table is a small JSON manifest (the same
 shape as `sqlsink.stage.StageReceipt.to_dict()`), never the table's
@@ -313,16 +321,20 @@ class StorageObject(StorageObjectRead, StorageObjectWrite):
 
     def _receipt(self) -> dict:
         """Content of the local receipt. For the published kinds it is built
-        from marker rows only, so it changes exactly when a relation was
-        republished and is byte-stable otherwise."""
+        from marker rows only, without `published_at`, so it changes exactly when a
+        relation's content was republished and is byte-stable otherwise (a
+        `refresh` publish only bumps the timestamps)."""
         if self.kind == "published":
-            return {"table": self.table_name, "marker": published_marker(self._engine, self.table_name, "table")}
+            return {
+                "table": self.table_name,
+                "marker": published_marker(self._engine, self.table_name, "table", timestamps=False),
+            }
         if self.kind == "dataset":
             manifest = self._manifest()
             return {
                 "dataset": self.table_name,
-                "marker": self._dataset_marker(),
-                "contour": published_marker(self._engine, manifest.contour_table, "contour"),
+                "marker": published_marker(self._engine, self.table_name, "dataset", timestamps=False),
+                "contour": published_marker(self._engine, manifest.contour_table, "contour", timestamps=False),
             }
         if self.kind == "grants":
             return grants_mod.grants_receipt(

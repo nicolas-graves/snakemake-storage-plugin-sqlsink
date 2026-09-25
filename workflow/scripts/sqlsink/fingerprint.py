@@ -173,7 +173,7 @@ def _iso(value) -> str | None:
     return value.isoformat() if value is not None else None
 
 
-def published_marker(engine, name: str, kind: str | None = None) -> dict | None:
+def published_marker(engine, name: str, kind: str | None = None, *, timestamps: bool = True) -> dict | None:
     """The publish marker row of relation `name` (a table, else a dataset,
     else a contour table; only `kind` if given), reduced to JSON-safe change-token fields."""
     from sqlalchemy import select
@@ -192,8 +192,9 @@ def published_marker(engine, name: str, kind: str | None = None) -> dict | None:
         if row is not None:
             out: dict[str, Any] = {"kind": k}
             for col, value in row.items():
-                if col != key:
-                    out[col] = _iso(value) if col == "published_at" else value
+                if col == key or (col == "published_at" and not timestamps):
+                    continue
+                out[col] = _iso(value) if col == "published_at" else value
             return out
     return None
 

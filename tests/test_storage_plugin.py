@@ -9,7 +9,7 @@ import logging
 import pytest
 
 from sqlsink.publish import publish_tables
-from sqlsink.stage import stage_table
+from sqlsink.stage import fetch_marker, stage_table
 
 pytest.importorskip("snakemake_storage_plugin_sqlsink")
 
@@ -143,7 +143,7 @@ def test_published_receipt_carries_marker_content(provider, engine, parquet_dir)
     receipt = json.loads(obj.local_path().read_text())
     assert receipt["table"] == "fake_a"
     assert receipt["marker"]["row_count"] == 3
-    assert receipt["marker"]["published_at"]
+    assert "published_at" not in receipt["marker"]  # byte-stable across refreshes
     # Distinct local path from the staged object of the same table.
     assert obj.local_path() != _obj(provider, "fake_a").local_path()
 
@@ -195,7 +195,8 @@ def test_grants_object_receipt_and_dialect_guard(provider, engine, parquet_dir, 
     obj.retrieve_object()
     receipt = json.loads(obj.local_path().read_text())
     assert receipt["relations"] == ["fake_a", "fake_b"]
-    assert receipt["published_at"]["fake_a"] and receipt["published_at"]["fake_b"] is None
+    assert receipt["markers"]["fake_a"]["update_id"] and receipt["markers"]["fake_b"] is None
+    assert "published_at" not in receipt["markers"]["fake_a"]
     assert obj.mtime() > 0
 
     if engine.dialect.name != "postgresql":
@@ -275,3 +276,40 @@ def test_dataset_object(provider, engine, tmp_path):
     obj.retrieve_object()
     receipt = json.loads(obj.local_path().read_text())
     assert receipt["dataset"] == "zones" and receipt["contour"]["kind"] == "contour"
+
+
+def test_refresh_publish_stamps_every_table_identically_and_keeps_receipts_stable(provider, engine, parquet_dir):
+    """The reason for `refresh`: outputs of one publish job must share one mtime
+    while their receipts do not change."""
+    names = ["fake_a", "fake_b"]
+    receipts = [stage_table(engine, n, str(parquet_dir[n])).to_dict() for n in names]
+    publish_tables(engine, receipts, refresh=True)
+
+    def snapshot():
+        out = {}
+        for n in names:
+            obj = _obj(provider, f"published/{n}")
+            obj.retrieve_object()
+            out[n] = (obj.mtime(), obj.local_path().read_text())
+        return out
+
+    first = snapshot()
+    assert first["fake_a"][0] == first["fake_b"][0] > 0
+
+    # Nothing changed: every receipt is "current", nothing is swapped, yet all
+    # markers are stamped again, together.
+    again = [stage_table(engine, n, str(parquet_dir[n])).to_dict() for n in names]
+    assert all(r["status"] == "current" for r in again)
+    assert publish_tables(engine, again, refresh=True) == []
+    second = snapshot()
+    assert second["fake_a"][0] == second["fake_b"][0] > first["fake_a"][0]
+    assert {n: second[n][1] for n in names} == {n: first[n][1] for n in names}
+
+
+def test_publish_without_refresh_leaves_current_markers_alone(engine, parquet_dir):
+    receipts = [stage_table(engine, "fake_a", str(parquet_dir["fake_a"])).to_dict()]
+    publish_tables(engine, receipts)
+    before = fetch_marker(engine, "fake_a")
+    again = [stage_table(engine, "fake_a", str(parquet_dir["fake_a"])).to_dict()]
+    assert publish_tables(engine, again) == []
+    assert fetch_marker(engine, "fake_a") == before

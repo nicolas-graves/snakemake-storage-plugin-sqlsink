@@ -14,7 +14,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 
-from sqlalchemy import inspect, select, text
+from sqlalchemy import func, inspect, select, text, update
 
 from . import metadata as meta_mod
 from .engine import advisory_lock, upsert_by_pk
@@ -30,14 +30,28 @@ class PublishConflict(RuntimeError):
     (another process published a newer version first)."""
 
 
-def publish_tables(engine, receipts: list[dict]) -> list[str]:
+def _refresh_markers(conn, table, pk_col: str, names: list[str]) -> None:
+    """Set `published_at` to the transaction's `now()` on the existing marker
+    rows of `names`. `update_id` and every other column are left alone."""
+    if names:
+        conn.execute(update(table).where(table.c[pk_col].in_(names)).values(published_at=func.now()))
+
+
+def publish_tables(engine, receipts: list[dict], *, refresh: bool = False) -> list[str]:
     """Publish every `status == "staged"` receipt in one transaction.
 
     Returns the list of table names actually published (skips tables that
     were already current).
+
+    With `refresh=True`, the marker of every table in `receipts` (staged or
+    already current) also gets `published_at = now()` in the same transaction,
+    so all of them carry one identical timestamp. A workflow rule with one
+    `published/{table}` storage output per table needs this: Snakemake
+    compares each input with the *oldest* output of a job, so outputs left at
+    older publish times would make the job rerun forever.
     """
     staged = [r for r in receipts if r["status"] == "staged"]
-    if not staged:
+    if not staged and not refresh:
         return []
 
     published: list[str] = []
@@ -60,6 +74,11 @@ def publish_tables(engine, receipts: list[dict]) -> list[str]:
                 conn.execute(text(f'ALTER TABLE "{staging_name}" RENAME TO "{table_name}"'))
                 _upsert_marker(conn, receipt)
                 published.append(table_name)
+
+            if refresh:
+                _refresh_markers(
+                    conn, meta_mod.analytics_table_updates, "table_name", [r["table"] for r in receipts]
+                )
 
     # Best-effort, non-transactional cleanup: failures here are logged,
     # not fatal — a leftover `*__old__*` table is wasted disk, not a
@@ -113,10 +132,16 @@ def publish_datasets(
     manifests: list[DatasetMaterialization],
     dataset_receipts: list[dict],
     contour_receipts: list[dict],
+    *,
+    refresh: bool = False,
 ) -> list[str]:
     """Publish every staged dataset (compact fact table + public
     compatibility view) and any staged shared contour tables, in one
     transaction under the same advisory lock as `publish_tables`.
+
+    `refresh=True` also sets `published_at = now()` on the markers of every
+    dataset and contour in the receipts, staged or current (see
+    `publish_tables`).
 
     Contours are published before the datasets that join against them, so a
     freshly created/replaced view never points at a stale or missing
@@ -125,7 +150,7 @@ def publish_datasets(
     """
     staged_contours = {r["contour_table"]: r for r in contour_receipts if r["status"] == "staged"}
     staged_datasets = [r for r in dataset_receipts if r["status"] == "staged"]
-    if not staged_contours and not staged_datasets:
+    if not staged_contours and not staged_datasets and not refresh:
         return []
 
     manifest_by_name = {m.name: m for m in manifests}
@@ -173,6 +198,14 @@ def publish_datasets(
                 _replace_compatibility_view(conn, dataset_name, receipt["view_sql"], old_physical, ts)
                 _upsert_dataset_marker(conn, receipt)
                 published.append(dataset_name)
+
+            if refresh:
+                _refresh_markers(
+                    conn, meta_mod.contour_updates, "contour_table", [r["contour_table"] for r in contour_receipts]
+                )
+                _refresh_markers(
+                    conn, meta_mod.analytics_dataset_updates, "dataset_name", [r["dataset"] for r in dataset_receipts]
+                )
 
     _drop_old_tables_qualified(engine, old_physical)
     return published

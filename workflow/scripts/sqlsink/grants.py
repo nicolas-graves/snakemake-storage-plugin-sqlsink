@@ -59,12 +59,12 @@ def role_has_select(engine, role: str, relations) -> bool:
 
 
 def grants_receipt(engine, role: str, relations) -> dict:
-    """Receipt content: the sorted relations and each one's marker
-    `published_at`, so it changes only when a relation was republished or
-    the set changed."""
+    """Receipt content: the sorted relations and each one's marker (without
+    `published_at`), so it changes only when a relation's content was
+    republished or the set changed, not when a publish merely refreshed the
+    marker timestamps."""
     relations = sorted(set(relations))
     published = {}
     for relation in relations:
-        marker = published_marker(engine, _split(relation)[1])
-        published[relation] = marker["published_at"] if marker else None
-    return {"role": role, "relations": relations, "published_at": published}
+        published[relation] = published_marker(engine, _split(relation)[1], timestamps=False)
+    return {"role": role, "relations": relations, "markers": published}

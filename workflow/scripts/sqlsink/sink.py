@@ -154,8 +154,12 @@ class Sink(Protocol):
         manifests: list[DatasetMaterialization],
         dataset_receipts: list[dict],
         contour_receipts: list[dict],
+        *,
+        refresh: bool = False,
     ) -> list[str]:
         """Make every staged receipt visible, all-or-nothing per sink.
+        `refresh` also stamps the markers of the datasets and contours that
+        were already current (see `publish.publish_tables`).
         Returns the names of the datasets actually published."""
 
     def joined_relation(self, manifest: DatasetMaterialization, con: duckdb.DuckDBPyConnection) -> str:

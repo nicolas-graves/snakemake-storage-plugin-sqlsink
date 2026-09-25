@@ -439,8 +439,10 @@ class SqlSink:
         manifests: list[DatasetMaterialization],
         dataset_receipts: list[dict],
         contour_receipts: list[dict],
+        *,
+        refresh: bool = False,
     ) -> list[str]:
-        return publish_datasets(self.engine, manifests, dataset_receipts, contour_receipts)
+        return publish_datasets(self.engine, manifests, dataset_receipts, contour_receipts, refresh=refresh)
 
     def joined_relation(self, manifest: DatasetMaterialization, con: duckdb.DuckDBPyConnection) -> str:
         """The public compatibility view. On PostgreSQL it is read through
