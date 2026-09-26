@@ -48,8 +48,19 @@ CONFIG = {
             "contour_join_columns": ["zone_id"],
             "compact_schema": "analytics_storage",
             "output_columns": ["zone_id", "metric", "polygon_coords"],
-        }
+        },
+        # Manifest v2 over the same Parquets: a fact and a shared dimension, joined.
+        {
+            "name": "zones_v2",
+            "components": ["v2_zone_contours", {"name": "v2_facts", "kind": "fact", "primary_key": ["zone_id"], "source": "facts"}],
+            "view": {
+                "base": "v2_facts",
+                "joins": [{"component": "v2_zone_contours", "on": {"zone_id": "zone_id"}}],
+                "select": ["zone_id", "metric", {"column": "polygon_coords", "from": "v2_zone_contours"}],
+            },
+        },
     ],
+    "components": [{"name": "v2_zone_contours", "kind": "dimension", "primary_key": ["zone_id"], "source": "contours"}],
 }
 
 
@@ -93,12 +104,20 @@ class Project:
         with pg.connect() as conn:
             t1 = conn.execute(text("SELECT a, b FROM t1 ORDER BY 1, 2")).fetchall()
             zones = conn.execute(text("SELECT zone_id, metric FROM zones ORDER BY 1")).fetchall()
+            v2 = conn.execute(text("SELECT zone_id, metric, polygon_coords FROM zones_v2 ORDER BY 1")).fetchall()
         pg.dispose()
         sink = make_engine(f"duckdb:///{self.root / 'results' / 'sink.duckdb'}")
         with sink.connect() as conn:
             duck_zones = conn.execute(text("SELECT zone_id, metric FROM zones ORDER BY 1")).fetchall()
+            duck_v2 = conn.execute(text("SELECT zone_id, metric, polygon_coords FROM zones_v2 ORDER BY 1")).fetchall()
         sink.dispose()
-        return {"t1": [tuple(r) for r in t1], "zones": [tuple(r) for r in zones], "duck_zones": [tuple(r) for r in duck_zones]}
+        return {
+            "t1": [tuple(r) for r in t1],
+            "zones": [tuple(r) for r in zones],
+            "duck_zones": [tuple(r) for r in duck_zones],
+            "zones_v2": [tuple(r) for r in v2],
+            "duck_zones_v2": [tuple(r) for r in duck_v2],
+        }
 
     def wipe_databases(self) -> None:
         _wipe_postgres()
@@ -110,6 +129,8 @@ class Project:
             "t1": [(1, "x"), (value, "y")],
             "zones": [("Z1", value), ("Z2", 2)],
             "duck_zones": [("Z1", value), ("Z2", 2)],
+            "zones_v2": [("Z1", value, "p1"), ("Z2", 2, "p2")],
+            "duck_zones_v2": [("Z1", value, "p1"), ("Z2", 2, "p2")],
         }
 
 

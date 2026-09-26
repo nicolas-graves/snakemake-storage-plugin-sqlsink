@@ -19,11 +19,12 @@ from sqlalchemy import Column, ForeignKeyConstraint, Index, MetaData, PrimaryKey
 from . import metadata as meta_mod
 from .engine import advisory_lock, bulk_load_streaming, ensure_schema, upsert_by_pk
 from .fingerprint import LOADER_VERSION, TYPE_MAP_VERSION
-from .manifest import PART_COLUMN, DatasetMaterialization
+from .manifest import PART_COLUMN, DatasetMaterialization, DatasetV2
 from .publish import publish_datasets
 from .queries import parts_select_sql, view_select_sql, zone_select_sql
 from .sink import ContourSource, NormalizedDataset, default_spill_dir
-from .stage import _DUCKDB_TO_SA
+from .sink_v2 import V2SinkMixin
+from .stage import _DUCKDB_TO_SA, fetch_marker
 
 
 @dataclass
@@ -189,7 +190,7 @@ def pg_attach(con: duckdb.DuckDBPyConnection, url, alias: str = "pg") -> None:
     con.execute(f"ATTACH '{escaped}' AS {alias} (TYPE postgres, READ_ONLY)")
 
 
-class SqlSink:
+class SqlSink(V2SinkMixin):
     """Sink over any SQLAlchemy engine on a supported dialect: PostgreSQL
     (production) or a DuckDB database file (local deployment)."""
 
@@ -215,11 +216,14 @@ class SqlSink:
         name, schema = meta_mod.physical_name_and_schema(self.engine.dialect.name, bare_name, manifest.compact_schema)
         return inspect(self.engine).has_table(name, schema=schema)
 
-    def published_intact(self, manifest: DatasetMaterialization) -> bool:
+    def published_intact(self, manifest: DatasetMaterialization | DatasetV2) -> bool:
         """True if every published object a marker vouches for is still in the
-        database: compact table, contour (and zone) table, public view. A
+        database: compact table, contour (and zone) table, public view (v2:
+        every component table and the view or materialized view). A
         marker outlives a table dropped or restored out of band, and trusting
         it alone would never regenerate what is gone."""
+        if isinstance(manifest, DatasetV2):
+            return self.published_intact_v2(manifest)
         bare = [meta_mod.compact_table_name(manifest.name), manifest.contour_table]
         if manifest.keyed:
             bare.append(manifest.zone_table)
@@ -441,8 +445,25 @@ class SqlSink:
         contour_receipts: list[dict],
         *,
         refresh: bool = False,
+        component_receipts: list[dict] = (),  # type: ignore[assignment]
     ) -> list[str]:
-        return publish_datasets(self.engine, manifests, dataset_receipts, contour_receipts, refresh=refresh)
+        return publish_datasets(
+            self.engine,
+            manifests,
+            dataset_receipts,
+            contour_receipts,
+            refresh=refresh,
+            component_receipts=list(component_receipts),
+        )
+
+    def table_source(self, table: str):
+        """A plain table published in this sink (by `stage_table`) as a component source."""
+        from .queries import SinkTableSource
+
+        marker = fetch_marker(self.engine, table)
+        if marker is None:
+            raise LookupError(f"table {table!r} has not been published in this sink; it cannot be a component source")
+        return SinkTableSource(table, marker["update_id"], self.engine, schema=self.view_schema)
 
     def joined_relation(self, manifest: DatasetMaterialization, con: duckdb.DuckDBPyConnection) -> str:
         """The public compatibility view. On PostgreSQL it is read through

@@ -44,10 +44,48 @@ class ArrowSource:
         return '"' + self.name.replace('"', '""') + '"'
 
 
+@dataclass(frozen=True, eq=False)
+class SinkTableSource:
+    """A plain table already published in the sink's own database (by
+    `stage_table` / `publish_tables`) used as the source of a component. Its
+    fingerprint is the publish marker's `update_id`. It is bound to a DuckDB
+    session by `bind`: read through DuckDB's postgres scanner on PostgreSQL
+    (nothing is copied), or, for a DuckDB sink file that the engine holds open,
+    copied into the session as one Arrow table (so keep such sources small)."""
+
+    table: str
+    sha256: str
+    engine: Any
+    schema: str | None = None
+
+    @property
+    def sql(self) -> str:
+        if self.engine.dialect.name == "postgresql":
+            return f'pg."{self.schema or "public"}"."{self.table}"'
+        return '"' + f"__sinktable__{self.table}" + '"'
+
+    def bind(self, con) -> None:
+        if self.engine.dialect.name == "postgresql":
+            from .sink_postgres import pg_attach
+
+            attached = con.execute("SELECT count(*) FROM duckdb_databases() WHERE database_name = 'pg'").fetchone()[0]
+            if not attached:
+                pg_attach(con, self.engine.url)
+            return
+        with self.engine.connect() as conn:
+            cur = conn.connection.driver_connection.cursor()
+            cur.execute(f'SELECT * FROM "{self.table}"')
+            table = cur.to_arrow_table() if hasattr(cur, "to_arrow_table") else cur.fetch_arrow_table()
+        con.register(f"__sinktable__{self.table}", table)
+
+
 def source_sql(source) -> str:
     """The `FROM` expression of a source: `read_parquet('<path>')` for a
-    path, the registered relation name for an `ArrowSource`."""
-    return source.sql if isinstance(source, ArrowSource) else read_parquet_sql(source)
+    path, the registered relation name for an `ArrowSource`, the sink relation
+    of a `SinkTableSource`."""
+    if isinstance(source, (ArrowSource, SinkTableSource)):
+        return source.sql
+    return read_parquet_sql(source)
 
 
 def bind_sources(con, *sources) -> None:
@@ -55,6 +93,8 @@ def bind_sources(con, *sources) -> None:
     for source in sources:
         if isinstance(source, ArrowSource):
             con.register(source.name, source.table)
+        elif isinstance(source, SinkTableSource):
+            source.bind(con)
 
 
 def compact_select_sql(manifest: DatasetMaterialization, fact_parquet_path) -> str:

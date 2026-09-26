@@ -35,6 +35,22 @@ TABLES = config["tables"]
 # config/config.yaml for the manifest shape and the pending TODOs.
 DATASETS = config.get("datasets", [])
 DATASETS_BY_NAME = {d["name"]: d for d in DATASETS}
+# Manifest v2 (a dataset declaring `components`): components shared by several
+# datasets are declared once at the top level of the config, and referenced by
+# name. Each Parquet-sourced component reads `results/parquet/<source>.parquet`.
+SHARED_COMPONENTS = config.get("components", [])
+
+
+def _dataset_parquets(wildcards):
+    """The Parquet inputs of a dataset: v1 `[facts, contours]`; v2 every
+    Parquet-sourced component, in declared order (shared ones resolved)."""
+    from sqlsink.manifest import load_manifest, load_shared_components
+
+    spec = DATASETS_BY_NAME[wildcards.dataset]
+    if "components" not in spec:
+        return [f"results/parquet/{spec['fact_source']}.parquet", f"results/parquet/{spec['contour_source']}.parquet"]
+    manifest = load_manifest(spec, load_shared_components(SHARED_COMPONENTS))
+    return [f"results/parquet/{c.source_key}.parquet" for c in manifest.components if c.source_table is None]
 
 
 storage sqlsink:
@@ -111,17 +127,17 @@ def _published_state(wildcards):
     "missing..." and re-stages once as a no-op; after that it is stable.)"""
     import time
 
-    from sqlsink.manifest import load_manifest
+    from sqlsink.manifest import load_manifest, load_shared_components
     from sqlsink.sink import dataset_is_published
 
-    published = dataset_is_published(SINK_SPECS[wildcards.sink], load_manifest(DATASETS_BY_NAME[wildcards.dataset]))
+    manifest = load_manifest(DATASETS_BY_NAME[wildcards.dataset], load_shared_components(SHARED_COMPONENTS))
+    published = dataset_is_published(SINK_SPECS[wildcards.sink], manifest)
     return "ok" if published else f"missing-{time.time_ns()}"
 
 
 rule stage_dataset:
     input:
-        fact_parquet=lambda wc: f"results/parquet/{DATASETS_BY_NAME[wc.dataset]['fact_source']}.parquet",
-        contour_parquet=lambda wc: f"results/parquet/{DATASETS_BY_NAME[wc.dataset]['contour_source']}.parquet",
+        parquets=_dataset_parquets,
     output:
         dataset_receipt="results/dataset_receipts/{sink}/{dataset}.json",
         contour_receipt="results/contour_receipts/{sink}/{dataset}.json",
@@ -130,6 +146,8 @@ rule stage_dataset:
     params:
         sink=lambda wc: SINK_SPECS[wc.sink],
         manifest=lambda wc: DATASETS_BY_NAME[wc.dataset],
+        shared=SHARED_COMPONENTS,
+        parquet_dir="results/parquet",
         # Read from the database while building the DAG. Not used by the
         # script: a change (dataset dropped, or a wiped database restored)
         # is what makes Snakemake re-run staging.
@@ -156,6 +174,7 @@ rule publish_datasets:
     params:
         sink=lambda wc: SINK_SPECS[wc.sink],
         manifests=DATASETS,
+        shared=SHARED_COMPONENTS,
     script:
         "../scripts/publish_datasets.py"
 
@@ -174,6 +193,7 @@ rule export_dataset:
     params:
         sink=lambda wc: SINK_SPECS[wc.sink],
         manifest=lambda wc: DATASETS_BY_NAME[wc.dataset],
+        shared=SHARED_COMPONENTS,
     threads: 2
     script:
         "../scripts/export_dataset.py"

@@ -67,8 +67,10 @@ def sha256_arrow(table) -> str:
 
 def sha256_source(source) -> str:
     """Fingerprint of a source: a Parquet file path, or an `ArrowSource`."""
-    from .queries import ArrowSource
+    from .queries import ArrowSource, SinkTableSource
 
+    if isinstance(source, SinkTableSource):
+        return source.sha256
     if isinstance(source, ArrowSource):
         return sha256_arrow(source.table)
     return sha256_file(source)
@@ -164,6 +166,47 @@ def compute_dataset_update_id_for_files(
     return update_id, fact_sha256, contour_sha256
 
 
+def compute_component_update_id(
+    definition_hash: str,
+    source_sha256: str,
+    loader_version: int = LOADER_VERSION,
+    type_map_version: int = TYPE_MAP_VERSION,
+) -> str:
+    """Identity of "this component definition, built from this source"."""
+    payload = {
+        "kind": "component",
+        "definition_hash": definition_hash,
+        "source_sha256": source_sha256,
+        "loader_version": loader_version,
+        "type_map_version": type_map_version,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def components_digest(component_update_ids: dict[str, str]) -> str:
+    """One digest over the update ids of every component of a dataset (the
+    fingerprint that makes a change of any component a change of the dataset)."""
+    return hashlib.sha256(json.dumps(component_update_ids, sort_keys=True).encode()).hexdigest()
+
+
+def compute_view_update_id(
+    manifest_hash: str,
+    component_update_ids: dict[str, str],
+    loader_version: int = LOADER_VERSION,
+    type_map_version: int = TYPE_MAP_VERSION,
+) -> str:
+    """Identity of a v2 dataset: its manifest (view definition, materialization,
+    components) and the identity of every component it is defined over."""
+    payload = {
+        "kind": "dataset_v2",
+        "manifest_hash": manifest_hash,
+        "components": component_update_ids,
+        "loader_version": loader_version,
+        "type_map_version": type_map_version,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
 def _split_relation(relation: str) -> tuple[str | None, str]:
     schema, _, name = relation.rpartition(".")
     return (schema or None), name
@@ -184,6 +227,7 @@ def published_marker(engine, name: str, kind: str | None = None, *, timestamps: 
         ("table", meta_mod.analytics_table_updates, "table_name"),
         ("dataset", meta_mod.analytics_dataset_updates, "dataset_name"),
         ("contour", meta_mod.contour_updates, "contour_table"),
+        ("component", meta_mod.component_updates, "component_name"),
     ):
         if kind not in (None, k):
             continue
@@ -222,7 +266,11 @@ def fingerprint(engine, relations, *, count_rows=True) -> dict:
     for relation in sorted(set(relations)):
         schema, name = _split_relation(relation)
         entry: dict = {"marker": published_marker(engine, name)}
-        exists = inspector.has_table(name, schema=schema) or name in inspector.get_view_names(schema=schema)
+        exists = (
+            inspector.has_table(name, schema=schema)
+            or name in inspector.get_view_names(schema=schema)
+            or (dialect == "postgresql" and name in inspector.get_materialized_view_names(schema=schema))
+        )
         entry["exists"] = exists
         if exists:
             cols = [[c["name"], str(c["type"])] for c in inspector.get_columns(name, schema=schema)]

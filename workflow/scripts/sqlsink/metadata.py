@@ -110,6 +110,45 @@ staged_contour_updates = Table(
     Column("staged_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
+# v2 components: one row per physical component table, whether shared by
+# several datasets or owned by one. All new tables: a marker table that already
+# exists in a database is never altered.
+component_updates = Table(
+    "_pipeline_meta_component_updates",
+    metadata,
+    Column("component_name", Text, primary_key=True),
+    Column("update_id", Text, nullable=False),
+    Column("source_sha256", Text, nullable=False),
+    Column("storage_schema", Text, nullable=False),
+    Column("row_count", BigInteger, nullable=False),
+    Column("published_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+staged_component_updates = Table(
+    "_pipeline_meta_staged_component_updates",
+    metadata,
+    Column("component_name", Text, primary_key=True),
+    Column("update_id", Text, nullable=False),
+    Column("source_sha256", Text, nullable=False),
+    Column("storage_schema", Text, nullable=False),
+    Column("row_count", BigInteger, nullable=False),
+    Column("staged_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+# Which components each published v2 dataset was built over: what tells a
+# publish which views must be recreated when a shared component is swapped.
+# The dataset's own marker (analytics_dataset_updates) carries composite
+# digests in its existing NOT NULL columns.
+dataset_components = Table(
+    "_pipeline_meta_dataset_components",
+    metadata,
+    Column("dataset_name", Text, primary_key=True),
+    Column("component_name", Text, primary_key=True),
+    Column("component_update_id", Text, nullable=False),
+    Column("materialize", Text, nullable=False),
+)
+
+
 def compact_table_name(dataset_name: str) -> str:
     return f"compact__{dataset_name}"
 

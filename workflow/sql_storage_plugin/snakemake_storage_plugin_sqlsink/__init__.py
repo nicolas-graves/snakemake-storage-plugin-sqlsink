@@ -145,13 +145,13 @@ class StorageProvider(StorageProviderBase):
     def manifests(self) -> dict:
         if self._manifests is None:
             import yaml
-            from sqlsink.manifest import load_manifest
+            from sqlsink.manifest import load_manifests
 
             if not self.settings.manifests:
                 raise ValueError("'dataset/{name}' objects need the `manifests` provider setting")
             data = yaml.safe_load(Path(self.settings.manifests).read_text())
-            specs = data.get("datasets", []) if isinstance(data, dict) else data
-            self._manifests = {m.name: m for m in map(load_manifest, specs)}
+            # v1 and v2 datasets; a mapping may also declare shared `components`.
+            self._manifests = {m.name: m for m in load_manifests(data)}
         return self._manifests
 
     def grant_relations(self, role: str) -> list:
@@ -163,7 +163,14 @@ class StorageProvider(StorageProviderBase):
             self._grants = yaml.safe_load(Path(self.settings.grants_file).read_text()) or {}
         if role not in self._grants:
             raise ValueError(f"role {role!r} is not declared in {self.settings.grants_file}")
-        return sorted(self._grants[role])
+        relations = []
+        for entry in self._grants[role]:
+            if isinstance(entry, str) and entry.startswith("dataset:"):
+                # `dataset:<name>`: the dataset's view and every table under it.
+                relations.extend(grants_mod.dataset_relations(self.manifests()[entry.partition(":")[2]]))
+            else:
+                relations.append(entry)
+        return sorted(set(relations))
 
     @classmethod
     def example_queries(cls) -> List[ExampleQuery]:
@@ -243,12 +250,23 @@ class StorageObject(StorageObjectRead, StorageObjectWrite):
         return published_marker(self._engine, self.table_name, "dataset")
 
     def _dataset_current(self) -> bool:
+        from sqlsink.manifest import DatasetV2
+        from sqlsink.sink import normalize_v2, sources_from_dir
         from sqlsink.sink_postgres import SqlSink
 
         manifest = self._manifest()
-        update_id, _, _ = compute_dataset_update_id_for_files(
-            manifest, self._parquet_path(manifest.fact_parquet_key()), self._parquet_path(manifest.contour_source)
-        )
+        if isinstance(manifest, DatasetV2):
+            sink = SqlSink(self._engine)
+            try:
+                update_id = normalize_v2(
+                    manifest, sources_from_dir(manifest, self.provider.settings.parquet_dir), sink=sink
+                ).update_id
+            except LookupError:  # a sink-table source that is not published yet
+                return False
+        else:
+            update_id, _, _ = compute_dataset_update_id_for_files(
+                manifest, self._parquet_path(manifest.fact_parquet_key()), self._parquet_path(manifest.contour_source)
+            )
         marker = self._dataset_marker()
         return (
             marker is not None
@@ -331,11 +349,18 @@ class StorageObject(StorageObjectRead, StorageObjectWrite):
             }
         if self.kind == "dataset":
             manifest = self._manifest()
-            return {
+            receipt = {
                 "dataset": self.table_name,
                 "marker": published_marker(self._engine, self.table_name, "dataset", timestamps=False),
-                "contour": published_marker(self._engine, manifest.contour_table, "contour", timestamps=False),
             }
+            if hasattr(manifest, "components"):  # v2: every component's marker
+                receipt["components"] = {
+                    c.name: published_marker(self._engine, c.name, "component", timestamps=False)
+                    for c in sorted(manifest.components, key=lambda c: c.name)
+                }
+            else:
+                receipt["contour"] = published_marker(self._engine, manifest.contour_table, "contour", timestamps=False)
+            return receipt
         if self.kind == "grants":
             return grants_mod.grants_receipt(
                 self._engine, self.table_name, self.provider.grant_relations(self.table_name)

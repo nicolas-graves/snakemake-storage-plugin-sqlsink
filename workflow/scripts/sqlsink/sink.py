@@ -21,14 +21,14 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Protocol
+from typing import Any, Iterator, Mapping, Protocol
 
 import duckdb
 from sqlalchemy import Engine
 
 from .fingerprint import compute_dataset_update_id, sha256_source
-from .manifest import DatasetMaterialization
-from .queries import ArrowSource, bind_sources, compact_select_sql, contour_select_sql, fetch_row
+from .manifest import DatasetMaterialization, DatasetV2
+from .queries import ArrowSource, SinkTableSource, bind_sources, compact_select_sql, contour_select_sql, fetch_row
 
 
 class OrphanFactsError(ValueError):
@@ -80,7 +80,7 @@ def as_source(value, name: str):
     DataFrame) becomes an `ArrowSource` registered under `name`."""
     if isinstance(value, (str, os.PathLike)):
         return str(value)
-    if isinstance(value, ArrowSource):
+    if isinstance(value, (ArrowSource, SinkTableSource)):
         return value
     import pyarrow as pa
 
@@ -156,6 +156,7 @@ class Sink(Protocol):
         contour_receipts: list[dict],
         *,
         refresh: bool = False,
+        component_receipts: list[dict] = (),  # type: ignore[assignment]
     ) -> list[str]:
         """Make every staged receipt visible, all-or-nothing per sink.
         `refresh` also stamps the markers of the datasets and contours that
@@ -270,6 +271,99 @@ def materialize(
     return publish(sink, [manifest], [result]), result
 
 
+# ---------------------------------------------------------------------------
+# Manifest v2: components + a view. Same stage / publish / materialize shape
+# as above; the v1 functions and receipts are untouched.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class NormalizedView:
+    """A v2 dataset bound to its component sources. `update_id` changes when the
+    manifest or any component's source or definition does."""
+
+    manifest: DatasetV2
+    sources: dict[str, Any]  # component name -> path | ArrowSource | SinkTableSource
+    source_sha256: dict[str, str]
+    component_update_ids: dict[str, str]
+    update_id: str
+
+    @property
+    def name(self) -> str:
+        return self.manifest.name
+
+
+def sources_from_dir(manifest: DatasetV2, parquet_dir: str) -> dict[str, str]:
+    """`{component: <dir>/<source key>.parquet}` for the Parquet-sourced components."""
+    return {c.name: str(Path(parquet_dir) / f"{c.source_key}.parquet") for c in manifest.components if c.source_table is None}
+
+
+def normalize_v2(manifest: DatasetV2, sources: Mapping[str, Any], *, sink: Any = None) -> NormalizedView:
+    """Fingerprint the source of every component (Parquet path, Arrow table /
+    DataFrame, or a table of the sink: `sink.table_source`) and bind them to
+    the manifest. Nothing is written anywhere."""
+    from .fingerprint import compute_component_update_id, compute_view_update_id
+
+    resolved: dict[str, Any] = {}
+    for component in manifest.components:
+        if component.source_table is not None:
+            if sink is None:
+                raise ValueError(f"component {component.name!r} reads sink table {component.source_table!r}: pass `sink=`")
+            resolved[component.name] = sink.table_source(component.source_table)
+        elif component.name in sources:
+            resolved[component.name] = as_source(sources[component.name], f"__component__{component.name}")
+        else:
+            raise KeyError(f"dataset {manifest.name!r}: no source given for component {component.name!r}")
+    shas = {name: sha256_source(src) for name, src in resolved.items()}
+    ids = {c.name: compute_component_update_id(c.definition_hash(), shas[c.name]) for c in manifest.components}
+    return NormalizedView(manifest, resolved, shas, ids, compute_view_update_id(manifest.manifest_hash(), ids))
+
+
+@dataclass
+class StageResultV2:
+    components: list[Receipt]
+    dataset: Receipt
+
+
+def stage_v2(
+    dataset: NormalizedView, sink: Any, *, threads: int | None = 2, memory_limit: str | None = None
+) -> StageResultV2:
+    """Stage every component, then the dataset, into `sink`. Nothing becomes
+    visible until `publish_v2`."""
+    manifest = dataset.manifest
+    with duckdb_session(threads, memory_limit, sink.spill_dir()) as con:
+        bind_sources(con, *dataset.sources.values())
+        components = [
+            sink.stage_component(c, manifest.schema_of(c), dataset.sources[c.name], con, dataset.source_sha256[c.name])
+            for c in manifest.components
+        ]
+        receipt = sink.stage_view_dataset(dataset, con)
+    return StageResultV2(components=components, dataset=receipt)
+
+
+def publish_v2(sink: Any, manifests: list[DatasetV2], results: list[StageResultV2], *, refresh: bool = False) -> list[str]:
+    from .publish import merge_component_receipts
+
+    merged = merge_component_receipts(receipt.to_dict() for result in results for receipt in result.components)
+    return sink.publish(
+        manifests, [r.dataset.to_dict() for r in results], [], refresh=refresh, component_receipts=list(merged.values())
+    )
+
+
+def materialize_v2(
+    manifest: DatasetV2,
+    sources: Mapping[str, Any],
+    sink: Any,
+    *,
+    threads: int | None = 2,
+    memory_limit: str | None = None,
+) -> tuple[list[str], StageResultV2]:
+    """Stage and publish a single v2 dataset."""
+    dataset = normalize_v2(manifest, sources, sink=sink)
+    result = stage_v2(dataset, sink, threads=threads, memory_limit=memory_limit)
+    return publish_v2(sink, [manifest], [result]), result
+
+
 def make_sink(spec: dict) -> Sink:
     """Build a sink from a config mapping: `{"type": "postgres", "dsn": ...}`
     or `{"type": "duckdb", "path": ...}`. A DuckDB spec may add
@@ -313,7 +407,7 @@ def dataset_is_published(spec: dict, manifest: DatasetMaterialization) -> bool:
         return False
     sink = make_sink(spec)
     try:
-        return sink.current_update_id(manifest.name) is not None and sink.published_intact(manifest)
+        return sink.current_update_id(manifest.name) is not None and sink.published_intact(manifest)  # type: ignore[arg-type]
     finally:
         sink.engine.dispose()
 

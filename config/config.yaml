@@ -23,6 +23,23 @@ loader_version: 1
 # Parquet's column names exactly: "Famille professionnelle (FAP\u00a02021/341)"
 # contains a non-breaking space. If a producer changes its columns, refresh
 # the list and re-run the equivalence check.
+#
+# Manifest v2 (a dataset that declares `components`) is accepted alongside. The
+# four datasets below stay v1 on purpose: their published markers and hashes are
+# unchanged. Shape of a v2 dataset (see tests/test_v2_sink.py for worked cases):
+#
+#   components:                       # top level: shared, staged once, referenced by name
+#     - {name: sector_paths, kind: dimension, primary_key: [region, f21, path]}
+#   datasets:
+#     - name: transitions
+#       materialize: view             # or: materialized
+#       components:
+#         - sector_paths              # shared
+#         - {name: fact, kind: fact, primary_key: [obs_id]}
+#         - {name: bridge, kind: bridge, primary_key: [anchor, f21], priority: priority}
+#       # either `view.joins` (many-to-one lookups; a fan-out needs `fan_out: true`) ...
+#       # ... or `view_sql`, with {component} references, a string or {duckdb:, postgresql:}:
+#       view_sql: "SELECT ... FROM {fact} f JOIN {bridge} b ON ... JOIN {sector_paths} p ON ..."
 datasets:
   - name: ecarts_emploi_formation_ze
     fact_source: ecarts_emploi_formation_ze
