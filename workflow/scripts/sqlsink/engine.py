@@ -22,7 +22,10 @@ def make_engine(dsn: str, **kwargs) -> Engine:
 
 LOCK_TIMEOUT_ENV = "SQLSINK_LOCK_TIMEOUT"
 KEEP_OLD_ENV = "SQLSINK_KEEP_OLD"
+ANALYZE_ENV = "SQLSINK_ANALYZE"
 _LOCK_TIMEOUT_RE = re.compile(r"^\d+\s*(us|ms|s|min|h|d)?$")
+_BOOL_TRUE = {"1", "true", "yes", "on"}
+_BOOL_FALSE = {"0", "false", "no", "off"}
 
 
 def resolve_lock_timeout(value: str | int | None = None) -> str | None:
@@ -58,7 +61,34 @@ def resolve_keep_old(value: bool | None = None) -> bool:
     variable (`1`/`true`/`yes`/`on`), else False."""
     if value is not None:
         return bool(value)
-    return os.environ.get(KEEP_OLD_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+    return os.environ.get(KEEP_OLD_ENV, "").strip().lower() in _BOOL_TRUE
+
+
+def resolve_analyze(value: bool | None = None) -> bool:
+    """Whether a publish runs `ANALYZE` on the relations it just swapped in
+    (PostgreSQL only; always a no-op on DuckDB, see `analyze_relations`):
+    `value`, else the `SQLSINK_ANALYZE` environment variable, else **True**.
+
+    Unlike `keep_old`, this defaults ON: right after a bulk COPY into a
+    freshly renamed table, PostgreSQL's autovacuum has not yet gathered
+    statistics, so the planner uses stale or default estimates until it
+    does, on its own schedule. That is a real, measured multi-second
+    latency regression on some queries; the one-`ANALYZE`-per-relation
+    cost of avoiding it is cheap, and forgetting to opt in is the kind of
+    thing that is only noticed after the fact. Set `SQLSINK_ANALYZE=0` (or
+    `false`/`no`/`off`) to opt back out.
+    """
+    if value is not None:
+        return bool(value)
+    raw = os.environ.get(ANALYZE_ENV)
+    if raw is None or not raw.strip():
+        return True
+    normalized = raw.strip().lower()
+    if normalized in _BOOL_TRUE:
+        return True
+    if normalized in _BOOL_FALSE:
+        return False
+    raise ValueError(f"invalid {ANALYZE_ENV} value {raw!r}: expected 1/true/yes/on or 0/false/no/off")
 
 
 @contextlib.contextmanager

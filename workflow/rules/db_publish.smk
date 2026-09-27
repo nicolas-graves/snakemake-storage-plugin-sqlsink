@@ -78,6 +78,12 @@ rule stage_table:
         "../scripts/stage_table.py"
 
 
+# On PostgreSQL, every publish also runs `ANALYZE` on the relations it just
+# swapped in (right after commit, never inside the publish transaction, so
+# it cannot extend how long the advisory/rename lock is held) -- otherwise
+# the query planner has no fresh statistics for them until autovacuum gets
+# around to it. On by default; set `SQLSINK_ANALYZE=0` to opt out. No-op on
+# DuckDB.
 rule publish_tables:
     input:
         receipts=storage.sqlsink(expand("{table}", table=TABLES)),

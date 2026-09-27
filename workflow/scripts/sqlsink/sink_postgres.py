@@ -430,6 +430,7 @@ class SqlSink(V2SinkMixin):
         component_receipts: list[dict] = (),  # type: ignore[assignment]
         keep_old: bool | None = None,
         lock_timeout: str | int | None = None,
+        analyze: bool | None = None,
     ) -> list[str]:
         return publish_datasets(
             self.engine,
@@ -440,6 +441,7 @@ class SqlSink(V2SinkMixin):
             component_receipts=list(component_receipts),
             keep_old=keep_old,
             lock_timeout=lock_timeout,
+            analyze=analyze,
         )
 
     def table_source(self, table: str):

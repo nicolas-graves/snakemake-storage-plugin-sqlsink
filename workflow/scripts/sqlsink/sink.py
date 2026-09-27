@@ -159,9 +159,10 @@ class Sink(Protocol):
         component_receipts: list[dict] = (),  # type: ignore[assignment]
         keep_old: bool | None = None,
         lock_timeout: str | int | None = None,
+        analyze: bool | None = None,
     ) -> list[str]:
         """Make every staged receipt visible, all-or-nothing per sink.
-        `keep_old` / `lock_timeout`: see `publish.publish_tables`.
+        `keep_old` / `lock_timeout` / `analyze`: see `publish.publish_tables`.
         `refresh` also stamps the markers of the datasets and contours that
         were already current (see `publish.publish_tables`).
         Returns the names of the datasets actually published."""
@@ -352,6 +353,7 @@ def publish_v2(
     refresh: bool = False,
     keep_old: bool | None = None,
     lock_timeout: str | int | None = None,
+    analyze: bool | None = None,
 ) -> list[str]:
     from .publish import merge_component_receipts
 
@@ -364,6 +366,7 @@ def publish_v2(
         component_receipts=list(merged.values()),
         keep_old=keep_old,
         lock_timeout=lock_timeout,
+        analyze=analyze,
     )
 
 

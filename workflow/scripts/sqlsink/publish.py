@@ -18,7 +18,14 @@ from sqlalchemy import delete, func, insert, inspect, select, text, update
 
 from . import metadata as meta_mod
 from . import keep_old as keep_old_mod
-from .engine import advisory_lock, apply_lock_timeout, resolve_keep_old, resolve_lock_timeout, upsert_by_pk
+from .engine import (
+    advisory_lock,
+    apply_lock_timeout,
+    resolve_analyze,
+    resolve_keep_old,
+    resolve_lock_timeout,
+    upsert_by_pk,
+)
 from .manifest import DatasetMaterialization, DatasetV2
 
 log = logging.getLogger(__name__)
@@ -45,6 +52,7 @@ def publish_tables(
     refresh: bool = False,
     keep_old: bool | None = None,
     lock_timeout: str | int | None = None,
+    analyze: bool | None = None,
 ) -> list[str]:
     """Publish every `status == "staged"` receipt in one transaction.
 
@@ -63,12 +71,17 @@ def publish_tables(
     for rollback and cleanup). `lock_timeout` (default: `SQLSINK_LOCK_TIMEOUT`,
     else the server's setting) is applied as `SET LOCAL lock_timeout` on
     PostgreSQL: a publish that cannot get its locks in time fails and rolls back.
+
+    `analyze` (default on; `SQLSINK_ANALYZE=0` to disable) runs `ANALYZE` on
+    every table actually published, on PostgreSQL only, after the publish
+    transaction has committed (see `_analyze_relations`).
     """
     staged = [r for r in receipts if r["status"] == "staged"]
     if not staged and not refresh:
         return []
     keep = resolve_keep_old(keep_old)
     lock_timeout = resolve_lock_timeout(lock_timeout)
+    do_analyze = resolve_analyze(analyze)
     meta_mod.create_all(engine)  # a publish is a write path: the only place besides staging that creates markers
 
     published: list[str] = []
@@ -99,6 +112,13 @@ def publish_tables(
                 _refresh_markers(
                     conn, meta_mod.analytics_table_updates, "table_name", [r["table"] for r in receipts]
                 )
+
+    # Outside the publish transaction and before cleanup: the latency fix
+    # (fresh statistics) should land as soon as possible after commit, ahead
+    # of the best-effort drop of old tables below, which can itself wait on
+    # a lock.
+    if do_analyze:
+        _analyze_relations(engine, [(t, None) for t in published], lock_timeout)
 
     # Best-effort, non-transactional cleanup: failures here are logged,
     # not fatal — a leftover `*__old__*` table is wasted disk, not a
@@ -148,6 +168,52 @@ def _drop_old_tables(engine, old_names: list[str], lock_timeout: str | None = No
             log.warning("could not drop leftover table %s", name, exc_info=True)
 
 
+def _analyze_relations(engine, relations: list[tuple[str, str | None]], lock_timeout: str | None = None) -> None:
+    """`ANALYZE` each of `relations` (bare_name, schema_or_None), one at a
+    time, each in its own transaction opened *after* the publish transaction
+    has already committed -- never inside it, and never inside the same
+    transaction as another relation's `ANALYZE`. This is what keeps
+    gathering fresh statistics from ever extending how long the publish's
+    advisory lock (or the brief `ACCESS EXCLUSIVE` lock the rename-swap
+    itself takes) is held: by the time the first `ANALYZE` runs, that lock
+    is already gone.
+
+    A no-op on every dialect but PostgreSQL: DuckDB has its own `ANALYZE`,
+    but computes a table's statistics as part of writing it (`CREATE TABLE
+    AS` / the bulk loader builds them alongside the data), so a freshly
+    published table there is never in PostgreSQL's post-COPY,
+    statistics-less state -- there is nothing stale for a post-publish step
+    to fix.
+
+    Right after a bulk `COPY` into a freshly renamed PostgreSQL table,
+    autovacuum has not run yet, so the planner has only default or stale
+    estimates for it until it does, on its own schedule -- a real, measured
+    multi-second query-latency regression right after a publish. This
+    closes that window immediately instead of waiting.
+
+    Best-effort, like `_drop_old_tables`: the new relation is live and
+    correct either way, so a failure here (e.g. a lock-timeout raise if this
+    relation is contended) is logged, not fatal -- it just means the planner
+    stays under-informed about this one relation until autovacuum eventually
+    gets to it.
+    """
+    if engine.dialect.name != "postgresql" or not relations:
+        return
+    seen: set[tuple[str, str | None]] = set()
+    for name, schema in relations:
+        key = (name, schema)
+        if key in seen:
+            continue
+        seen.add(key)
+        ref = f'"{schema}"."{name}"' if schema else f'"{name}"'
+        try:
+            with engine.begin() as conn:
+                apply_lock_timeout(conn, lock_timeout)
+                conn.execute(text(f"ANALYZE {ref}"))
+        except Exception:
+            log.warning("could not ANALYZE %s", ref, exc_info=True)
+
+
 def publish_datasets(
     engine,
     manifests: list,
@@ -158,6 +224,7 @@ def publish_datasets(
     component_receipts: list[dict] = (),  # type: ignore[assignment]
     keep_old: bool | None = None,
     lock_timeout: str | int | None = None,
+    analyze: bool | None = None,
 ) -> list[str]:
     """Publish every staged dataset and any staged shared table, in one
     transaction under the same advisory lock as `publish_tables`.
@@ -187,6 +254,11 @@ def publish_datasets(
     replaced component, flat table and (PostgreSQL) view is renamed to
     `__old__<name>` in its schema and made unreadable to other roles, instead of
     being dropped; `keep_old.rollback_kept_old` / `cleanup_kept_old` act on them.
+
+    `analyze`: see `publish_tables`. Every swapped-in component, compact
+    fact, contour and zone table is analyzed; a swapped-in v2 public
+    relation is too, unless it is a plain view (nothing to analyze -- its
+    components already are) rather than a table or materialized view.
     """
     component_receipts = list(component_receipts)
     staged_contours = {r["contour_table"]: r for r in contour_receipts if r["status"] == "staged"}
@@ -198,6 +270,7 @@ def publish_datasets(
         return []
     keep = resolve_keep_old(keep_old)
     lock_timeout = resolve_lock_timeout(lock_timeout)
+    do_analyze = resolve_analyze(analyze)
     meta_mod.create_all(engine)  # a publish is a write path (see publish_tables)
 
     v1_manifests = [m for m in manifests if isinstance(m, DatasetMaterialization)]
@@ -209,6 +282,7 @@ def publish_datasets(
     published: list[str] = []
     ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d%H%M%S%f")
     old_physical: list[tuple[str, str | None]] = []
+    fresh: list[tuple[str, str | None]] = []
 
     with engine.begin() as conn:
         apply_lock_timeout(conn, lock_timeout)
@@ -221,7 +295,7 @@ def publish_datasets(
             for name, receipt in staged_components.items():
                 _assert_component_marker_unchanged_since_staging(conn, name, receipt)
                 _rename_swap_physical(
-                    conn, dialect, name, receipt["schema"], meta_mod.staging_name(name), old_physical, ts, keep
+                    conn, dialect, name, receipt["schema"], meta_mod.staging_name(name), old_physical, ts, keep, fresh
                 )
                 _upsert_component_marker(conn, receipt)
 
@@ -230,10 +304,10 @@ def publish_datasets(
                 zone = zone_table.get(contour_table)
                 if zone:
                     _rename_swap_physical(
-                        conn, dialect, zone, schema, meta_mod.staging_name(zone), old_physical, ts, keep
+                        conn, dialect, zone, schema, meta_mod.staging_name(zone), old_physical, ts, keep, fresh
                     )
                 _rename_swap_physical(
-                    conn, dialect, contour_table, schema, meta_mod.staging_name(contour_table), old_physical, ts, keep
+                    conn, dialect, contour_table, schema, meta_mod.staging_name(contour_table), old_physical, ts, keep, fresh
                 )
                 _upsert_contour_marker(conn, receipt)
 
@@ -252,6 +326,7 @@ def publish_datasets(
                     old_physical,
                     ts,
                     keep,
+                    fresh,
                 )
 
                 _replace_compatibility_view(conn, dataset_name, receipt["view_sql"], old_physical, ts, keep)
@@ -263,7 +338,7 @@ def publish_datasets(
                 _assert_dataset_marker_unchanged_since_staging(conn, dataset_name, receipt)
                 _assert_components_live(conn, receipt)
                 _replace_public_relation(
-                    conn, dialect, dataset_name, receipt["view_sql"], receipt["materialize"], old_physical, ts, keep
+                    conn, dialect, dataset_name, receipt["view_sql"], receipt["materialize"], old_physical, ts, keep, fresh
                 )
                 _upsert_view_dataset_marker(conn, receipt)
                 published.append(dataset_name)
@@ -278,6 +353,9 @@ def publish_datasets(
                 _refresh_markers(
                     conn, meta_mod.analytics_dataset_updates, "dataset_name", [r["dataset"] for r in dataset_receipts]
                 )
+
+    if do_analyze:
+        _analyze_relations(engine, fresh, lock_timeout)
 
     _drop_old_tables_qualified(engine, old_physical, lock_timeout)
     return published
@@ -369,6 +447,7 @@ def _replace_public_relation(
     old_physical: list[tuple[str, str | None]],
     ts: str,
     keep: bool = False,
+    fresh: list[tuple[str, str | None]] | None = None,
 ) -> None:
     """Point the public name at a fresh view (`materialize == "view"`) or
     materialized view. Whatever is there is replaced, of whatever kind: a
@@ -376,7 +455,14 @@ def _replace_public_relation(
     of a migrated dataset, kept aside as `__old__` and dropped after commit).
     DuckDB has no materialized views: there it is a table built by `CREATE
     TABLE AS`, in the same transaction. With `keep`, whatever is there is kept
-    aside as `__old__<name>` instead (`keep_old.park`)."""
+    aside as `__old__<name>` instead (`keep_old.park`).
+
+    `fresh`, if given and `materialize != "view"`, gets `(name, None)`
+    appended: a materialized view or table just got fresh data and is what
+    `_analyze_relations` should later `ANALYZE`. A plain view holds no data
+    of its own -- `ANALYZE` on a view is not meaningful in PostgreSQL, and
+    the components it reads are analyzed on their own swap -- so it is never
+    added."""
     inspector = inspect(conn)
     views = set(inspector.get_view_names())
     tables = set(inspector.get_table_names()) - views
@@ -397,6 +483,8 @@ def _replace_public_relation(
         conn.execute(text(f'CREATE MATERIALIZED VIEW "{name}" AS {select_sql}'))
     else:
         conn.execute(text(f'CREATE TABLE "{name}" AS {select_sql}'))
+    if materialize != "view" and fresh is not None:
+        fresh.append((name, None))
 
 
 def _upsert_view_dataset_marker(conn, receipt: dict) -> None:
@@ -451,10 +539,15 @@ def _rename_swap_physical(
     old_physical: list[tuple[str, str | None]],
     ts: str,
     keep: bool = False,
+    fresh: list[tuple[str, str | None]] | None = None,
 ) -> None:
     """Rename-swap a schema-aware physical table into place, the same
     all-or-nothing pattern as `publish_tables`' plain-name rename, extended
-    to a real PostgreSQL schema where the dialect supports one."""
+    to a real PostgreSQL schema where the dialect supports one.
+
+    `fresh`, if given, gets `(live_name, live_schema)` appended: the relation
+    now holds the new data, so it is what `_analyze_relations` should later
+    `ANALYZE` (outside this transaction, once it has committed)."""
     live_name, live_schema = meta_mod.physical_name_and_schema(dialect, bare_name, schema)
     staging_name, staging_schema = meta_mod.physical_name_and_schema(dialect, staging_bare_name, schema)
     live_ref = f'"{live_schema}"."{live_name}"' if live_schema else f'"{live_name}"'
@@ -469,6 +562,8 @@ def _rename_swap_physical(
         old_physical.append((old_name, live_schema))
 
     conn.execute(text(f'ALTER TABLE {staging_ref} RENAME TO "{live_name}"'))
+    if fresh is not None:
+        fresh.append((live_name, live_schema))
 
 
 def _replace_compatibility_view(
