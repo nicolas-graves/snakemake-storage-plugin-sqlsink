@@ -18,12 +18,15 @@ from sqlalchemy import inspect, text
 from sqlalchemy.exc import DBAPIError
 
 from fixtures.make_fixtures import TRANSITIONS_VIEW_SQL, make_default_fixtures, make_transitions_fixtures, write_fixture, write_table
+from sqlalchemy import event
+
 from sqlsink import keep_old as ko
 from sqlsink import metadata as meta_mod
 from sqlsink.engine import (
     _lock_key_to_bigint,
     apply_lock_timeout,
     make_engine,
+    resolve_analyze,
     resolve_keep_old,
     resolve_lock_timeout,
 )
@@ -44,8 +47,10 @@ COMPONENTS = [
 VIEW_COLUMNS = "obs_id, region, flow, path, metric"
 
 
-def transitions():
-    return load_manifest({"name": "transitions", "components": COMPONENTS, "view_sql": TRANSITIONS_VIEW_SQL})
+def transitions(materialize="view"):
+    return load_manifest(
+        {"name": "transitions", "components": COMPONENTS, "view_sql": TRANSITIONS_VIEW_SQL, "materialize": materialize}
+    )
 
 
 def rows(engine, sql, **params):
@@ -476,3 +481,220 @@ def test_keep_old_refuses_an_identifier_postgres_would_truncate(engine):
         conn.execute(text(f'CREATE TABLE "{long_name}" (a INTEGER)'))
         with pytest.raises(ValueError, match="identifier limit"):
             ko.park(conn, long_name, None)
+
+
+# -- 4. analyze -------------------------------------------------------------------------
+
+
+class _capture_analyze:
+    """Records every `ANALYZE ...` statement `engine` executes while this is
+    active, so tests can assert exactly which relations were analyzed
+    without depending on timing-sensitive `pg_stat_user_tables` columns."""
+
+    def __init__(self, engine):
+        self.engine = engine
+        self.statements: list[str] = []
+
+    def _listener(self, conn, cursor, statement, parameters, context, executemany):
+        if statement.strip().upper().startswith("ANALYZE"):
+            self.statements.append(statement.strip())
+
+    def __enter__(self):
+        event.listen(self.engine, "before_cursor_execute", self._listener)
+        return self
+
+    def __exit__(self, *exc):
+        event.remove(self.engine, "before_cursor_execute", self._listener)
+
+
+def test_resolve_analyze(monkeypatch):
+    monkeypatch.delenv("SQLSINK_ANALYZE", raising=False)
+    assert resolve_analyze() is True  # unlike keep_old/lock_timeout, this defaults ON
+    assert resolve_analyze(True) is True and resolve_analyze(False) is False
+    monkeypatch.setenv("SQLSINK_ANALYZE", "0")
+    assert resolve_analyze() is False
+    assert resolve_analyze(True) is True  # an explicit value wins over the environment
+    for on in ("1", "true", "Yes", "ON"):
+        monkeypatch.setenv("SQLSINK_ANALYZE", on)
+        assert resolve_analyze() is True
+    for off in ("0", "false", "No", "OFF"):
+        monkeypatch.setenv("SQLSINK_ANALYZE", off)
+        assert resolve_analyze() is False
+    monkeypatch.setenv("SQLSINK_ANALYZE", "sometimes")
+    with pytest.raises(ValueError):
+        resolve_analyze()
+
+
+def test_analyze_is_a_noop_on_duckdb(engine, parquet_dir):
+    if engine.dialect.name != "duckdb":
+        pytest.skip("duckdb-specific: exercised for real by the postgres tests below")
+    receipt = stage_table(engine, "fake_a", str(parquet_dir["fake_a"])).to_dict()
+    with _capture_analyze(engine) as cap:
+        assert publish_tables(engine, [receipt], analyze=True) == ["fake_a"]
+    assert cap.statements == []
+
+
+@needs_pg
+def test_analyze_runs_after_commit_with_the_publish_lock_already_released(engine, parquet_dir):
+    receipt = stage_table(engine, "fake_a", str(parquet_dir["fake_a"])).to_dict()
+    lock_free_when_analyzed = []
+    marker_visible_when_analyzed = []
+
+    def _check(conn, cursor, statement, parameters, context, executemany):
+        if not statement.strip().upper().startswith("ANALYZE"):
+            return
+        other = make_engine(PG_DSN).connect()
+        try:
+            key = {"k": _lock_key_to_bigint(PUBLISH_LOCK_KEY)}
+            got = other.execute(text("SELECT pg_try_advisory_lock(:k)"), key).scalar()
+            lock_free_when_analyzed.append(bool(got))
+            if got:
+                other.execute(text("SELECT pg_advisory_unlock(:k)"), key)
+            marker_visible_when_analyzed.append(
+                other.execute(
+                    text("SELECT update_id FROM _pipeline_meta_table_updates WHERE table_name = 'fake_a'")
+                ).scalar()
+                is not None
+            )
+            other.rollback()
+        finally:
+            other.close()
+
+    event.listen(engine, "before_cursor_execute", _check)
+    try:
+        assert publish_tables(engine, [receipt]) == ["fake_a"]
+    finally:
+        event.remove(engine, "before_cursor_execute", _check)
+
+    assert lock_free_when_analyzed == [True]  # the transaction holding the advisory lock had already committed
+    assert marker_visible_when_analyzed == [True]  # ...and so had the publish itself, from another session
+    assert rows(engine, "SELECT count(*) FROM pg_stats WHERE schemaname = 'public' AND tablename = 'fake_a'")[0][0] > 0
+
+
+@needs_pg
+def test_analyze_after_publish_datasets_also_runs_with_the_lock_already_released(engine, tmp_path):
+    """Same proof as `test_analyze_runs_after_commit_with_the_publish_lock_already_released`,
+    for the `publish_datasets`/`publish_v2` path (the one production datasets
+    actually go through), not just `publish_tables`."""
+    toy = make_transitions_fixtures(tmp_path / "toy")
+    sink = SqlSink(engine)
+    manifest = transitions()
+    result = stage_v2(normalize_v2(manifest, toy, sink=sink), sink)
+
+    lock_free_when_analyzed = []
+    marker_visible_when_analyzed = []
+
+    def _check(conn, cursor, statement, parameters, context, executemany):
+        if not statement.strip().upper().startswith("ANALYZE"):
+            return
+        other = make_engine(PG_DSN).connect()
+        try:
+            key = {"k": _lock_key_to_bigint(PUBLISH_LOCK_KEY)}
+            got = other.execute(text("SELECT pg_try_advisory_lock(:k)"), key).scalar()
+            lock_free_when_analyzed.append(bool(got))
+            if got:
+                other.execute(text("SELECT pg_advisory_unlock(:k)"), key)
+            marker_visible_when_analyzed.append(
+                other.execute(
+                    text("SELECT update_id FROM _pipeline_meta_dataset_updates WHERE dataset_name = 'transitions'")
+                ).scalar()
+                is not None
+            )
+            other.rollback()
+        finally:
+            other.close()
+
+    event.listen(engine, "before_cursor_execute", _check)
+    try:
+        assert publish_v2(sink, [manifest], [result]) == ["transitions"]
+    finally:
+        event.remove(engine, "before_cursor_execute", _check)
+
+    assert lock_free_when_analyzed and all(lock_free_when_analyzed)
+    assert marker_visible_when_analyzed and all(marker_visible_when_analyzed)
+
+
+@needs_pg
+def test_analyze_targets_the_published_table_by_name(engine, parquet_dir):
+    receipt = stage_table(engine, "fake_a", str(parquet_dir["fake_a"])).to_dict()
+    with _capture_analyze(engine) as cap:
+        assert publish_tables(engine, [receipt]) == ["fake_a"]
+    assert cap.statements == ['ANALYZE "fake_a"']
+
+
+@needs_pg
+def test_analyze_can_be_disabled_by_kwarg_or_environment(engine, parquet_dir, monkeypatch):
+    receipt = stage_table(engine, "fake_a", str(parquet_dir["fake_a"])).to_dict()
+    with _capture_analyze(engine) as cap:
+        publish_tables(engine, [receipt], analyze=False)
+    assert cap.statements == []
+    assert rows(engine, "SELECT count(*) FROM pg_stats WHERE schemaname = 'public' AND tablename = 'fake_a'")[0][0] == 0
+
+    _change(parquet_dir["fake_a"], [(1, "v2", 1.0)])
+    receipt2 = stage_table(engine, "fake_a", str(parquet_dir["fake_a"])).to_dict()
+    monkeypatch.setenv("SQLSINK_ANALYZE", "0")
+    with _capture_analyze(engine) as cap:
+        assert publish_tables(engine, [receipt2]) == ["fake_a"]
+    assert cap.statements == []
+
+
+@needs_pg
+def test_analyze_targets_only_the_swapped_v2_components_never_the_plain_view(engine, tmp_path):
+    toy = make_transitions_fixtures(tmp_path / "toy")
+    sink = SqlSink(engine)
+    manifest = transitions()  # materialize="view" by default: a plain view holds no data of its own
+
+    result = stage_v2(normalize_v2(manifest, toy, sink=sink), sink)
+    with _capture_analyze(engine) as cap:
+        assert publish_v2(sink, [manifest], [result]) == ["transitions"]
+    assert sorted(cap.statements) == sorted(
+        f'ANALYZE "analytics_storage"."{n}"' for n in ("fact", "bridge", "sector_paths")
+    )
+    assert not any("transitions" in s for s in cap.statements)
+
+    # only `fact` changes: only `fact` is re-analyzed, `bridge`/`sector_paths` are untouched
+    write_table(
+        toy["fact"], "obs_id BIGINT, region VARCHAR, anchor VARCHAR, flow DOUBLE",
+        [(1, "R1", "A", 99.0), (2, "R1", "B", 20.25), (3, "R2", "A", None)],
+    )
+    result2 = stage_v2(normalize_v2(manifest, toy, sink=sink), sink)
+    with _capture_analyze(engine) as cap2:
+        assert publish_v2(sink, [manifest], [result2]) == ["transitions"]
+    assert cap2.statements == ['ANALYZE "analytics_storage"."fact"']
+
+
+@needs_pg
+def test_analyze_targets_a_materialized_view_dataset_too(engine, tmp_path):
+    toy = make_transitions_fixtures(tmp_path / "toy")
+    sink = SqlSink(engine)
+    manifest = transitions(materialize="materialized")
+    result = stage_v2(normalize_v2(manifest, toy, sink=sink), sink)
+    with _capture_analyze(engine) as cap:
+        assert publish_v2(sink, [manifest], [result]) == ["transitions"]
+    assert 'ANALYZE "transitions"' in cap.statements  # the matview holds its own copy of the data
+
+
+@needs_pg
+def test_analyze_targets_the_compact_contour_and_zone_tables_of_a_keyed_v1_dataset(engine, tmp_path):
+    from fixtures.make_fixtures import make_multipart_geometry_fixtures
+    from sqlsink.manifest import DatasetMaterialization
+    from sqlsink.sink import materialize as materialize_v1
+
+    manifest = DatasetMaterialization(
+        name="zones",
+        geometry_column="polygon_coords",
+        contour_table="contours",
+        fact_join_columns=("zone_id",),
+        contour_join_columns=("zone_id",),
+        output_columns=("zone_id", "metric", "polygon_coords"),
+        fact_source="facts",
+        keyed=True,
+    )
+    paths = make_multipart_geometry_fixtures(tmp_path / "parquet")
+    with _capture_analyze(engine) as cap:
+        published, _ = materialize_v1(manifest, str(paths["facts"]), str(paths["contours"]), SqlSink(engine))
+    assert published == ["zones"]
+    assert sorted(cap.statements) == sorted(
+        f'ANALYZE "analytics_storage"."{n}"' for n in (meta_mod.compact_table_name("zones"), "contours", "contours_zone")
+    )
+    assert 'ANALYZE "zones"' not in cap.statements  # the public compatibility relation is a view, never ANALYZEd
