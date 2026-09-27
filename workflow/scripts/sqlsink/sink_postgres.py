@@ -131,39 +131,19 @@ def _constrained_table(
 
 
 def fetch_dataset_marker(engine, dataset_name: str) -> dict | None:
-    with engine.connect() as conn:
-        stmt = select(meta_mod.analytics_dataset_updates).where(
-            meta_mod.analytics_dataset_updates.c.dataset_name == dataset_name
-        )
-        row = conn.execute(stmt).mappings().first()
-        return dict(row) if row else None
+    return meta_mod.fetch_one(engine, meta_mod.analytics_dataset_updates, "dataset_name", dataset_name)
 
 
 def fetch_staged_dataset_marker(engine, dataset_name: str) -> dict | None:
-    with engine.connect() as conn:
-        stmt = select(meta_mod.staged_dataset_updates).where(
-            meta_mod.staged_dataset_updates.c.dataset_name == dataset_name
-        )
-        row = conn.execute(stmt).mappings().first()
-        return dict(row) if row else None
+    return meta_mod.fetch_one(engine, meta_mod.staged_dataset_updates, "dataset_name", dataset_name)
 
 
 def fetch_contour_marker(engine, contour_table: str) -> dict | None:
-    with engine.connect() as conn:
-        stmt = select(meta_mod.contour_updates).where(
-            meta_mod.contour_updates.c.contour_table == contour_table
-        )
-        row = conn.execute(stmt).mappings().first()
-        return dict(row) if row else None
+    return meta_mod.fetch_one(engine, meta_mod.contour_updates, "contour_table", contour_table)
 
 
 def fetch_staged_contour_marker(engine, contour_table: str) -> dict | None:
-    with engine.connect() as conn:
-        stmt = select(meta_mod.staged_contour_updates).where(
-            meta_mod.staged_contour_updates.c.contour_table == contour_table
-        )
-        row = conn.execute(stmt).mappings().first()
-        return dict(row) if row else None
+    return meta_mod.fetch_one(engine, meta_mod.staged_contour_updates, "contour_table", contour_table)
 
 
 def pg_attach(con: duckdb.DuckDBPyConnection, url, alias: str = "pg") -> None:
@@ -239,6 +219,7 @@ class SqlSink(V2SinkMixin):
         Datasets sharing a contour table stage the same physical tables, and
         the marker checks below are check-then-act, so concurrent stagings of
         one contour table are serialized under an advisory lock."""
+        meta_mod.create_all(self.engine)  # staging is a write path; planning never creates markers
         with self.engine.connect() as lock_conn:
             with advisory_lock(lock_conn, f"snakemake_sql:stage_contours:{contour.manifest.contour_table}"):
                 return self._stage_contours(contour, con)
@@ -350,6 +331,7 @@ class SqlSink(V2SinkMixin):
         """
         engine, manifest = self.engine, dataset.manifest
         update_id = dataset.update_id
+        meta_mod.create_all(engine)  # staging is a write path; planning never creates markers
         marker = fetch_dataset_marker(engine, manifest.name)
 
         def receipt(status, staging_compact_table, row_count) -> DatasetStageReceipt:
@@ -446,6 +428,8 @@ class SqlSink(V2SinkMixin):
         *,
         refresh: bool = False,
         component_receipts: list[dict] = (),  # type: ignore[assignment]
+        keep_old: bool | None = None,
+        lock_timeout: str | int | None = None,
     ) -> list[str]:
         return publish_datasets(
             self.engine,
@@ -454,6 +438,8 @@ class SqlSink(V2SinkMixin):
             contour_receipts,
             refresh=refresh,
             component_receipts=list(component_receipts),
+            keep_old=keep_old,
+            lock_timeout=lock_timeout,
         )
 
     def table_source(self, table: str):

@@ -59,10 +59,11 @@ storage sqlsink:
     parquet_dir="results/parquet",
 
 
-# No separate "setup_db_meta" rule: the marker table has to exist before
-# Snakemake can even build the DAG (it calls exists()/mtime() on every
-# storage object up front), so the storage plugin's own StorageProvider
-# creates it eagerly on construction (see workflow/sql_storage_plugin/).
+# No separate "setup_db_meta" rule, and no marker-table creation at DAG time:
+# Snakemake calls exists()/mtime() on every storage object while building the
+# DAG (also for `snakemake -n`), and those calls are read-only -- a database
+# without marker tables just has no markers. The stage and publish code paths
+# create them when they run (`sqlsink.metadata.create_all`).
 
 
 rule stage_table:
@@ -197,3 +198,29 @@ rule export_dataset:
     threads: 2
     script:
         "../scripts/export_dataset.py"
+
+
+# Rollback window of a publish (see workflow/scripts/sqlsink/keep_old.py).
+# Publish with `SQLSINK_KEEP_OLD=1` to keep every replaced relation aside as
+# `__old__<name>`, verify, then either drop them or swap them back:
+#   snakemake --forcerun cleanup_kept_old results/kept_old_cleanup.json
+#   snakemake --forcerun rollback_kept_old results/kept_old_rollback.json
+# `SQLSINK_LOCK_TIMEOUT` (e.g. 45s) bounds every lock wait of both.
+rule cleanup_kept_old:
+    output:
+        report="results/kept_old_cleanup.json",
+    params:
+        dsn=config["db"]["dsn"],
+        lock_timeout=None,
+    script:
+        "../scripts/cleanup_kept_old.py"
+
+
+rule rollback_kept_old:
+    output:
+        report="results/kept_old_rollback.json",
+    params:
+        dsn=config["db"]["dsn"],
+        lock_timeout=None,
+    script:
+        "../scripts/rollback_kept_old.py"

@@ -9,6 +9,8 @@ go through plain SQLAlchemy Core and needs no dialect branching at all.
 from __future__ import annotations
 
 import contextlib
+import os
+import re
 from collections.abc import Iterator
 
 from sqlalchemy import Engine, Table, create_engine, func, insert, select, text, update
@@ -18,11 +20,58 @@ def make_engine(dsn: str, **kwargs) -> Engine:
     return create_engine(dsn, **kwargs)
 
 
+LOCK_TIMEOUT_ENV = "SQLSINK_LOCK_TIMEOUT"
+KEEP_OLD_ENV = "SQLSINK_KEEP_OLD"
+_LOCK_TIMEOUT_RE = re.compile(r"^\d+\s*(us|ms|s|min|h|d)?$")
+
+
+def resolve_lock_timeout(value: str | int | None = None) -> str | None:
+    """The PostgreSQL `lock_timeout` a publish should run under: `value`, else
+    the `SQLSINK_LOCK_TIMEOUT` environment variable, else None (the server's
+    own setting applies). A bare number is milliseconds, as in PostgreSQL;
+    `"45s"`, `"500ms"`, `"2min"` are accepted, `0` disables the timeout."""
+    if value is None:
+        value = os.environ.get(LOCK_TIMEOUT_ENV)
+    if value is None or not str(value).strip():
+        return None
+    text_value = str(value).strip()
+    if not _LOCK_TIMEOUT_RE.match(text_value):
+        raise ValueError(f"invalid lock timeout {value!r}: expected a number of milliseconds or a value like '45s', '500ms', '2min'")
+    return text_value
+
+
+def apply_lock_timeout(conn, value: str | int | None = None) -> None:
+    """`SET LOCAL lock_timeout` for the current transaction (PostgreSQL only;
+    a no-op on DuckDB, whose single-writer model has no lock waits of this
+    kind). Applies to every lock wait in the transaction, the publish advisory
+    lock included, so a publish that cannot get its locks fails and rolls
+    back instead of queueing (and stalling readers behind it) indefinitely."""
+    resolved = resolve_lock_timeout(value)
+    if resolved is None or conn.engine.dialect.name != "postgresql":
+        return
+    conn.execute(text("SELECT set_config('lock_timeout', :value, true)"), {"value": resolved})
+
+
+def resolve_keep_old(value: bool | None = None) -> bool:
+    """Whether a publish keeps replaced relations aside (`__old__<name>`)
+    instead of dropping them: `value`, else the `SQLSINK_KEEP_OLD` environment
+    variable (`1`/`true`/`yes`/`on`), else False."""
+    if value is not None:
+        return bool(value)
+    return os.environ.get(KEEP_OLD_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 @contextlib.contextmanager
-def advisory_lock(conn, key: str) -> Iterator[None]:
+def advisory_lock(conn, key: str, *, transactional: bool = False) -> Iterator[None]:
     """Serialize a critical section across concurrent processes.
 
-    PostgreSQL: session-level advisory lock, released on function exit.
+    PostgreSQL: session-level advisory lock, released on function exit. With
+    `transactional=True` (only for use inside a transaction that ends with the
+    critical section) a transaction-level lock is taken instead: it is
+    released by commit *and* rollback, so a failed statement (an aborted
+    transaction can no longer run `pg_advisory_unlock`, and a rolled-back
+    session lock would stay on the pooled connection) cannot leak it or mask
+    the original error. Both kinds share one lock namespace.
     DuckDB: an exclusive `flock` on a sidecar file next to the database
     file (DuckDB is single-writer; this makes a second publisher wait
     instead of failing to open the file).
@@ -30,11 +79,18 @@ def advisory_lock(conn, key: str) -> Iterator[None]:
     dialect = conn.engine.dialect.name
     if dialect == "postgresql":
         lock_id = _lock_key_to_bigint(key)
+        if transactional:
+            conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_id})
+            yield
+            return
         conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": lock_id})
         try:
             yield
         finally:
-            conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": lock_id})
+            try:
+                conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": lock_id})
+            except Exception:  # aborted transaction: do not mask the original error
+                pass
     elif dialect == "duckdb":
         with _file_lock(conn.engine.url.database):
             yield

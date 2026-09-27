@@ -157,8 +157,11 @@ class Sink(Protocol):
         *,
         refresh: bool = False,
         component_receipts: list[dict] = (),  # type: ignore[assignment]
+        keep_old: bool | None = None,
+        lock_timeout: str | int | None = None,
     ) -> list[str]:
         """Make every staged receipt visible, all-or-nothing per sink.
+        `keep_old` / `lock_timeout`: see `publish.publish_tables`.
         `refresh` also stamps the markers of the datasets and contours that
         were already current (see `publish.publish_tables`).
         Returns the names of the datasets actually published."""
@@ -341,12 +344,26 @@ def stage_v2(
     return StageResultV2(components=components, dataset=receipt)
 
 
-def publish_v2(sink: Any, manifests: list[DatasetV2], results: list[StageResultV2], *, refresh: bool = False) -> list[str]:
+def publish_v2(
+    sink: Any,
+    manifests: list[DatasetV2],
+    results: list[StageResultV2],
+    *,
+    refresh: bool = False,
+    keep_old: bool | None = None,
+    lock_timeout: str | int | None = None,
+) -> list[str]:
     from .publish import merge_component_receipts
 
     merged = merge_component_receipts(receipt.to_dict() for result in results for receipt in result.components)
     return sink.publish(
-        manifests, [r.dataset.to_dict() for r in results], [], refresh=refresh, component_receipts=list(merged.values())
+        manifests,
+        [r.dataset.to_dict() for r in results],
+        [],
+        refresh=refresh,
+        component_receipts=list(merged.values()),
+        keep_old=keep_old,
+        lock_timeout=lock_timeout,
     )
 
 
@@ -364,11 +381,14 @@ def materialize_v2(
     return publish_v2(sink, [manifest], [result]), result
 
 
-def make_sink(spec: dict) -> Sink:
+def make_sink(spec: dict, *, create_markers: bool = True) -> Sink:
     """Build a sink from a config mapping: `{"type": "postgres", "dsn": ...}`
     or `{"type": "duckdb", "path": ...}`. A DuckDB spec may add
     `"schema": "public"`: the default schema (created if missing) of every
-    connection, so views and markers land there rather than in `main`."""
+    connection, so views and markers land there rather than in `main`.
+    `create_markers=False` (read-only callers) leaves a DuckDB file without its
+    marker tables as it is: readers treat missing marker tables as "no marker",
+    and staging/publishing create them when they need them."""
     kind = spec.get("type")
     if kind in ("postgres", "duckdb"):
         from .engine import make_engine
@@ -381,7 +401,8 @@ def make_sink(spec: dict) -> Sink:
         engine = make_engine(f"duckdb:///{spec['path']}")
         if spec.get("schema"):
             _default_schema(engine, spec["schema"])
-        create_all(engine)  # a DuckDB file is created on first use: it needs its marker tables
+        if create_markers:
+            create_all(engine)  # a DuckDB file is created on first use: it needs its marker tables
         return SqlSink(engine, view_schema=spec.get("schema"))
     raise ValueError(f"unknown sink type {kind!r} (expected 'postgres' or 'duckdb')")
 
@@ -405,7 +426,7 @@ def dataset_is_published(spec: dict, manifest: DatasetMaterialization) -> bool:
     returning: a DuckDB file lock must not outlive the check."""
     if spec.get("type") == "duckdb" and not os.path.exists(spec["path"]):
         return False
-    sink = make_sink(spec)
+    sink = make_sink(spec, create_markers=False)
     try:
         return sink.current_update_id(manifest.name) is not None and sink.published_intact(manifest)  # type: ignore[arg-type]
     finally:

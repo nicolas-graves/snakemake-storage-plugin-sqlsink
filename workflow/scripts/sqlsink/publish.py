@@ -17,7 +17,8 @@ import logging
 from sqlalchemy import delete, func, insert, inspect, select, text, update
 
 from . import metadata as meta_mod
-from .engine import advisory_lock, upsert_by_pk
+from . import keep_old as keep_old_mod
+from .engine import advisory_lock, apply_lock_timeout, resolve_keep_old, resolve_lock_timeout, upsert_by_pk
 from .manifest import DatasetMaterialization, DatasetV2
 
 log = logging.getLogger(__name__)
@@ -37,7 +38,14 @@ def _refresh_markers(conn, table, pk_col: str, names: list[str]) -> None:
         conn.execute(update(table).where(table.c[pk_col].in_(names)).values(published_at=func.now()))
 
 
-def publish_tables(engine, receipts: list[dict], *, refresh: bool = False) -> list[str]:
+def publish_tables(
+    engine,
+    receipts: list[dict],
+    *,
+    refresh: bool = False,
+    keep_old: bool | None = None,
+    lock_timeout: str | int | None = None,
+) -> list[str]:
     """Publish every `status == "staged"` receipt in one transaction.
 
     Returns the list of table names actually published (skips tables that
@@ -49,24 +57,36 @@ def publish_tables(engine, receipts: list[dict], *, refresh: bool = False) -> li
     `published/{table}` storage output per table needs this: Snakemake
     compares each input with the *oldest* output of a job, so outputs left at
     older publish times would make the job rerun forever.
+
+    `keep_old` (default off; `SQLSINK_KEEP_OLD`) keeps every replaced table aside
+    as `__old__<name>` instead of dropping it after the commit (see `keep_old.py`
+    for rollback and cleanup). `lock_timeout` (default: `SQLSINK_LOCK_TIMEOUT`,
+    else the server's setting) is applied as `SET LOCAL lock_timeout` on
+    PostgreSQL: a publish that cannot get its locks in time fails and rolls back.
     """
     staged = [r for r in receipts if r["status"] == "staged"]
     if not staged and not refresh:
         return []
+    keep = resolve_keep_old(keep_old)
+    lock_timeout = resolve_lock_timeout(lock_timeout)
+    meta_mod.create_all(engine)  # a publish is a write path: the only place besides staging that creates markers
 
     published: list[str] = []
     ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d%H%M%S%f")
     old_names: list[str] = []
 
     with engine.begin() as conn:
-        with advisory_lock(conn, PUBLISH_LOCK_KEY):
+        apply_lock_timeout(conn, lock_timeout)
+        with advisory_lock(conn, PUBLISH_LOCK_KEY, transactional=True):
             inspector = inspect(conn)
             for receipt in staged:
                 table_name = receipt["table"]
                 _assert_marker_unchanged_since_staging(conn, table_name, receipt)
 
                 staging_name = meta_mod.staging_name(table_name)
-                if inspector.has_table(table_name):
+                if keep:
+                    keep_old_mod.park(conn, table_name, None)
+                elif inspector.has_table(table_name):
                     old_name = f"{table_name}__old__{ts}"
                     conn.execute(text(f'ALTER TABLE "{table_name}" RENAME TO "{old_name}"'))
                     old_names.append(old_name)
@@ -84,7 +104,7 @@ def publish_tables(engine, receipts: list[dict], *, refresh: bool = False) -> li
     # not fatal — a leftover `*__old__*` table is wasted disk, not a
     # correctness problem, and leaving it around briefly gives a human a
     # window to inspect it if a downstream smoke test fails.
-    _drop_old_tables(engine, old_names)
+    _drop_old_tables(engine, old_names, lock_timeout)
 
     return published
 
@@ -117,10 +137,11 @@ def _upsert_marker(conn, receipt: dict) -> None:
     upsert_by_pk(conn, meta_mod.analytics_table_updates, "table_name", values, now_col="published_at")
 
 
-def _drop_old_tables(engine, old_names: list[str]) -> None:
+def _drop_old_tables(engine, old_names: list[str], lock_timeout: str | None = None) -> None:
     for name in old_names:
         try:
             with engine.begin() as conn:
+                apply_lock_timeout(conn, lock_timeout)
                 conn.execute(text(f'DROP TABLE IF EXISTS "{name}"'))
         except Exception:
             # Non-fatal: leftover table, cleaned up on a later run/sweep.
@@ -135,6 +156,8 @@ def publish_datasets(
     *,
     refresh: bool = False,
     component_receipts: list[dict] = (),  # type: ignore[assignment]
+    keep_old: bool | None = None,
+    lock_timeout: str | int | None = None,
 ) -> list[str]:
     """Publish every staged dataset and any staged shared table, in one
     transaction under the same advisory lock as `publish_tables`.
@@ -159,6 +182,11 @@ def publish_datasets(
     other manifests) must be recreated or it would keep reading the old
     table. Such a dataset that is not restaged in this publish is a
     `PublishConflict`.
+
+    `keep_old` and `lock_timeout`: see `publish_tables`. With `keep_old`, every
+    replaced component, flat table and (PostgreSQL) view is renamed to
+    `__old__<name>` in its schema and made unreadable to other roles, instead of
+    being dropped; `keep_old.rollback_kept_old` / `cleanup_kept_old` act on them.
     """
     component_receipts = list(component_receipts)
     staged_contours = {r["contour_table"]: r for r in contour_receipts if r["status"] == "staged"}
@@ -168,6 +196,9 @@ def publish_datasets(
     staged_views = [r for r in staged_all if r.get("kind") == "dataset_v2"]
     if not staged_contours and not staged_datasets and not staged_components and not staged_views and not refresh:
         return []
+    keep = resolve_keep_old(keep_old)
+    lock_timeout = resolve_lock_timeout(lock_timeout)
+    meta_mod.create_all(engine)  # a publish is a write path (see publish_tables)
 
     v1_manifests = [m for m in manifests if isinstance(m, DatasetMaterialization)]
     v2_by_name = {m.name: m for m in manifests if isinstance(m, DatasetV2)}
@@ -180,7 +211,8 @@ def publish_datasets(
     old_physical: list[tuple[str, str | None]] = []
 
     with engine.begin() as conn:
-        with advisory_lock(conn, PUBLISH_LOCK_KEY):
+        apply_lock_timeout(conn, lock_timeout)
+        with advisory_lock(conn, PUBLISH_LOCK_KEY, transactional=True):
             dialect = conn.engine.dialect.name
 
             _assert_keyed_dependents_restaged(v1_manifests, staged_contours, staged_datasets)
@@ -189,7 +221,7 @@ def publish_datasets(
             for name, receipt in staged_components.items():
                 _assert_component_marker_unchanged_since_staging(conn, name, receipt)
                 _rename_swap_physical(
-                    conn, dialect, name, receipt["schema"], meta_mod.staging_name(name), old_physical, ts
+                    conn, dialect, name, receipt["schema"], meta_mod.staging_name(name), old_physical, ts, keep
                 )
                 _upsert_component_marker(conn, receipt)
 
@@ -198,10 +230,10 @@ def publish_datasets(
                 zone = zone_table.get(contour_table)
                 if zone:
                     _rename_swap_physical(
-                        conn, dialect, zone, schema, meta_mod.staging_name(zone), old_physical, ts
+                        conn, dialect, zone, schema, meta_mod.staging_name(zone), old_physical, ts, keep
                     )
                 _rename_swap_physical(
-                    conn, dialect, contour_table, schema, meta_mod.staging_name(contour_table), old_physical, ts
+                    conn, dialect, contour_table, schema, meta_mod.staging_name(contour_table), old_physical, ts, keep
                 )
                 _upsert_contour_marker(conn, receipt)
 
@@ -219,9 +251,10 @@ def publish_datasets(
                     meta_mod.staging_name(compact_bare),
                     old_physical,
                     ts,
+                    keep,
                 )
 
-                _replace_compatibility_view(conn, dataset_name, receipt["view_sql"], old_physical, ts)
+                _replace_compatibility_view(conn, dataset_name, receipt["view_sql"], old_physical, ts, keep)
                 _upsert_dataset_marker(conn, receipt)
                 published.append(dataset_name)
 
@@ -230,7 +263,7 @@ def publish_datasets(
                 _assert_dataset_marker_unchanged_since_staging(conn, dataset_name, receipt)
                 _assert_components_live(conn, receipt)
                 _replace_public_relation(
-                    conn, dialect, dataset_name, receipt["view_sql"], receipt["materialize"], old_physical, ts
+                    conn, dialect, dataset_name, receipt["view_sql"], receipt["materialize"], old_physical, ts, keep
                 )
                 _upsert_view_dataset_marker(conn, receipt)
                 published.append(dataset_name)
@@ -246,7 +279,7 @@ def publish_datasets(
                     conn, meta_mod.analytics_dataset_updates, "dataset_name", [r["dataset"] for r in dataset_receipts]
                 )
 
-    _drop_old_tables_qualified(engine, old_physical)
+    _drop_old_tables_qualified(engine, old_physical, lock_timeout)
     return published
 
 
@@ -335,18 +368,22 @@ def _replace_public_relation(
     materialize: str,
     old_physical: list[tuple[str, str | None]],
     ts: str,
+    keep: bool = False,
 ) -> None:
     """Point the public name at a fresh view (`materialize == "view"`) or
     materialized view. Whatever is there is replaced, of whatever kind: a
     view, a materialized view, or a plain table (the pre-existing flat table
     of a migrated dataset, kept aside as `__old__` and dropped after commit).
     DuckDB has no materialized views: there it is a table built by `CREATE
-    TABLE AS`, in the same transaction."""
+    TABLE AS`, in the same transaction. With `keep`, whatever is there is kept
+    aside as `__old__<name>` instead (`keep_old.park`)."""
     inspector = inspect(conn)
     views = set(inspector.get_view_names())
     tables = set(inspector.get_table_names()) - views
     matviews = set(inspector.get_materialized_view_names()) if dialect == "postgresql" else set()
-    if name in matviews:
+    if keep:
+        keep_old_mod.park(conn, name, None)
+    elif name in matviews:
         conn.execute(text(f'DROP MATERIALIZED VIEW "{name}"'))
     elif name in views:
         conn.execute(text(f'DROP VIEW "{name}"'))
@@ -413,6 +450,7 @@ def _rename_swap_physical(
     staging_bare_name: str,
     old_physical: list[tuple[str, str | None]],
     ts: str,
+    keep: bool = False,
 ) -> None:
     """Rename-swap a schema-aware physical table into place, the same
     all-or-nothing pattern as `publish_tables`' plain-name rename, extended
@@ -423,7 +461,9 @@ def _rename_swap_physical(
     staging_ref = f'"{staging_schema}"."{staging_name}"' if staging_schema else f'"{staging_name}"'
 
     inspector = inspect(conn)
-    if inspector.has_table(live_name, schema=live_schema):
+    if keep:
+        keep_old_mod.park(conn, live_name, live_schema)
+    elif inspector.has_table(live_name, schema=live_schema):
         old_name = f"{live_name}__old__{ts}"
         conn.execute(text(f'ALTER TABLE {live_ref} RENAME TO "{old_name}"'))
         old_physical.append((old_name, live_schema))
@@ -432,7 +472,7 @@ def _rename_swap_physical(
 
 
 def _replace_compatibility_view(
-    conn, dataset_name: str, view_sql: str, old_physical: list[tuple[str, str | None]], ts: str
+    conn, dataset_name: str, view_sql: str, old_physical: list[tuple[str, str | None]], ts: str, keep: bool = False
 ) -> None:
     """Point the public dataset name at the freshly published view body.
 
@@ -445,7 +485,9 @@ def _replace_compatibility_view(
     is_table = dataset_name in set(inspector.get_table_names())
     is_view = dataset_name in set(inspector.get_view_names())
 
-    if is_table and not is_view:
+    if keep:
+        keep_old_mod.park(conn, dataset_name, None)
+    elif is_table and not is_view:
         old_name = f"{dataset_name}__old__{ts}"
         conn.execute(text(f'ALTER TABLE "{dataset_name}" RENAME TO "{old_name}"'))
         old_physical.append((old_name, None))
@@ -494,12 +536,15 @@ def _upsert_contour_marker(conn, receipt: dict) -> None:
     upsert_by_pk(conn, meta_mod.contour_updates, "contour_table", values, now_col="published_at")
 
 
-def _drop_old_tables_qualified(engine, old_physical: list[tuple[str, str | None]]) -> None:
+def _drop_old_tables_qualified(
+    engine, old_physical: list[tuple[str, str | None]], lock_timeout: str | None = None
+) -> None:
     # Reverse of swap order: dependents (facts, parts) before what they reference.
     for name, schema in reversed(old_physical):
         ref = f'"{schema}"."{name}"' if schema else f'"{name}"'
         try:
             with engine.begin() as conn:
+                apply_lock_timeout(conn, lock_timeout)
                 conn.execute(text(f"DROP TABLE IF EXISTS {ref}"))
         except Exception:
             # Non-fatal: leftover table, cleaned up on a later run/sweep.
