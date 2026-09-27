@@ -133,22 +133,16 @@ def orphan_count_v2(con: duckdb.DuckDBPyConnection, manifest: DatasetV2, sources
 
 
 def fetch_component_marker(engine, name: str) -> dict | None:
-    with engine.connect() as conn:
-        row = conn.execute(select(meta_mod.component_updates).where(meta_mod.component_updates.c.component_name == name)).mappings().first()
-        return dict(row) if row else None
+    return meta_mod.fetch_one(engine, meta_mod.component_updates, "component_name", name)
 
 
 def fetch_staged_component_marker(engine, name: str) -> dict | None:
-    with engine.connect() as conn:
-        row = (
-            conn.execute(select(meta_mod.staged_component_updates).where(meta_mod.staged_component_updates.c.component_name == name))
-            .mappings()
-            .first()
-        )
-        return dict(row) if row else None
+    return meta_mod.fetch_one(engine, meta_mod.staged_component_updates, "component_name", name)
 
 
 def published_dataset_components(engine, dataset_name: str) -> dict[str, str]:
+    if not meta_mod.table_exists(engine, meta_mod.dataset_components):
+        return {}
     with engine.connect() as conn:
         rows = conn.execute(
             select(meta_mod.dataset_components.c.component_name, meta_mod.dataset_components.c.component_update_id).where(
@@ -161,7 +155,7 @@ def published_dataset_components(engine, dataset_name: str) -> dict[str, str]:
 def dependents_of(engine, component_names) -> set[str]:
     """Published v2 datasets built over any of `component_names`."""
     names = list(component_names)
-    if not names:
+    if not names or not meta_mod.table_exists(engine, meta_mod.dataset_components):
         return set()
     with engine.connect() as conn:
         rows = conn.execute(
@@ -203,6 +197,7 @@ class V2SinkMixin:
         """Stage one component into a private staging table. Idempotent, and
         serialized per component (a shared component may be staged by several
         datasets' jobs at once)."""
+        meta_mod.create_all(self.engine)  # staging is a write path; planning never creates markers
         with self.engine.connect() as lock_conn:
             with advisory_lock(lock_conn, f"snakemake_sql:stage_component:{schema}.{component.name}"):
                 return self._stage_component(component, schema, source, con, source_sha256)

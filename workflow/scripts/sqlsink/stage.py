@@ -11,7 +11,7 @@ import datetime as dt
 from dataclasses import asdict, dataclass
 
 import duckdb
-from sqlalchemy import Column, MetaData, Table, inspect, select
+from sqlalchemy import Column, MetaData, Table, inspect
 
 from . import metadata as meta_mod
 from .engine import bulk_load, upsert_by_pk
@@ -83,12 +83,7 @@ def _staging_table_object(table_name: str, columns: list[tuple[str, str]]) -> Ta
 
 def fetch_marker(engine, table_name: str) -> dict | None:
     """Public: the marker row for `table_name`, or None if never published."""
-    with engine.connect() as conn:
-        stmt = select(meta_mod.analytics_table_updates).where(
-            meta_mod.analytics_table_updates.c.table_name == table_name
-        )
-        row = conn.execute(stmt).mappings().first()
-        return dict(row) if row else None
+    return meta_mod.fetch_one(engine, meta_mod.analytics_table_updates, "table_name", table_name)
 
 
 _fetch_marker = fetch_marker
@@ -98,12 +93,7 @@ def fetch_staged_marker(engine, table_name: str) -> dict | None:
     """Public: the staging-marker row for `table_name` ("has this exact
     fingerprint already been staged"), or None if never staged.
     """
-    with engine.connect() as conn:
-        stmt = select(meta_mod.staged_table_updates).where(
-            meta_mod.staged_table_updates.c.table_name == table_name
-        )
-        row = conn.execute(stmt).mappings().first()
-        return dict(row) if row else None
+    return meta_mod.fetch_one(engine, meta_mod.staged_table_updates, "table_name", table_name)
 
 
 def is_current(engine, table_name: str, parquet_path: str, extra_config: dict | None = None) -> bool:
@@ -134,6 +124,9 @@ def is_current(engine, table_name: str, parquet_path: str, extra_config: dict | 
 
 def stage_table(engine, table_name: str, parquet_path: str, extra_config: dict | None = None) -> StageReceipt:
     update_id, parquet_sha256 = compute_update_id_for_file(table_name, parquet_path, extra_config)
+    # Staging is a write path: the marker tables are created here, never by a
+    # read-only existence check.
+    meta_mod.create_all(engine)
     marker = _fetch_marker(engine, table_name)
     inspector = inspect(engine)
 

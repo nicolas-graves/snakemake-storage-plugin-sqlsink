@@ -219,8 +219,6 @@ def _iso(value) -> str | None:
 def published_marker(engine, name: str, kind: str | None = None, *, timestamps: bool = True) -> dict | None:
     """The publish marker row of relation `name` (a table, else a dataset,
     else a contour table; only `kind` if given), reduced to JSON-safe change-token fields."""
-    from sqlalchemy import select
-
     from . import metadata as meta_mod
 
     for k, table, key in (
@@ -231,8 +229,7 @@ def published_marker(engine, name: str, kind: str | None = None, *, timestamps: 
     ):
         if kind not in (None, k):
             continue
-        with engine.connect() as conn:
-            row = conn.execute(select(table).where(table.c[key] == name)).mappings().first()
+        row = meta_mod.fetch_one(engine, table, key, name)  # None if the marker table is missing
         if row is not None:
             out: dict[str, Any] = {"kind": k}
             for col, value in row.items():

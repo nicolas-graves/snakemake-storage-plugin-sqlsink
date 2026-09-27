@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List, Optional
 
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from snakemake_interface_storage_plugins.io import IOCacheStorageInterface, Mtime
@@ -61,7 +61,6 @@ from snakemake_interface_storage_plugins.settings import StorageProviderSettings
 from sqlsink import grants as grants_mod
 from sqlsink.engine import make_engine
 from sqlsink.fingerprint import compute_dataset_update_id_for_files, published_marker
-from sqlsink.metadata import create_all
 from sqlsink.stage import fetch_marker, fetch_staged_marker, is_current, stage_table
 
 TABLE_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
@@ -127,13 +126,15 @@ class StorageProvider(StorageProviderBase):
             raise ValueError(f"on_unreachable must be one of {ON_UNREACHABLE}, not {self.settings.on_unreachable!r}")
         self.reachable = True
         # Snakemake queries every storage object's exists()/mtime() while
-        # building the DAG, before any rule (including a would-be
-        # "setup_pg_meta" rule) has run. So the marker table has to be
-        # guaranteed to exist right here, at provider construction time,
-        # rather than via a separate Snakemake rule with its own ordering.
+        # building the DAG, i.e. also for `snakemake -n`, so nothing here (or in
+        # exists()/mtime()/inventory) may write: no DDL, in particular no marker
+        # tables. A database without them simply has no markers, so every object
+        # is "missing"; staging and publishing create them when they run
+        # (`sqlsink.metadata.create_all`). Construction only probes the connection.
         self.engine = make_engine(resolve_dsn(self.settings))
         try:
-            create_all(self.engine)
+            with self.engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
         except SQLAlchemyError:
             if self.settings.on_unreachable == "error":
                 raise

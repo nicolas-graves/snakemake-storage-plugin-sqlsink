@@ -162,5 +162,30 @@ def physical_name_and_schema(dialect_name: str, bare_name: str, schema: str) -> 
 
 
 def create_all(engine) -> None:
-    """Idempotently ensure the marker tables exist."""
+    """Idempotently ensure the marker tables exist.
+
+    This is DDL: only code paths that stage or publish may call it. Planning
+    (`snakemake -n`), existence checks, mtimes and inventories must stay
+    read-only and go through `table_exists` / `fetch_one`, which treat a
+    missing marker table as "no marker"."""
     metadata.create_all(engine, checkfirst=True)
+
+
+def table_exists(engine, table) -> bool:
+    """Read-only: does the marker table exist (catalog lookup, no DDL)?"""
+    from sqlalchemy import inspect
+
+    return inspect(engine).has_table(table.name)
+
+
+def fetch_one(engine, table, key_col: str, key) -> dict | None:
+    """Read-only: the marker row of `table` whose `key_col` is `key`, or None
+    if there is none or the marker table itself does not exist (a database
+    nothing was ever staged into)."""
+    from sqlalchemy import select
+
+    if not table_exists(engine, table):
+        return None
+    with engine.connect() as conn:
+        row = conn.execute(select(table).where(table.c[key_col] == key)).mappings().first()
+    return dict(row) if row else None
