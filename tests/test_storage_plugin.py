@@ -39,6 +39,10 @@ def test_exists_false_before_any_publish(provider):
     assert _obj(provider, "fake_a").exists() is False
 
 
+def test_exists_false_when_parquet_was_never_produced(provider):
+    assert _obj(provider, "never_exported").exists() is False
+
+
 def test_exists_true_after_publish_and_mtime_reflects_marker(provider, engine, parquet_dir):
     receipt = stage_table(engine, "fake_a", str(parquet_dir["fake_a"]))
     publish_tables(engine, [receipt.to_dict()])

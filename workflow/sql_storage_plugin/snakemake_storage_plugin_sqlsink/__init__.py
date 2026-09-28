@@ -300,7 +300,12 @@ class StorageObject(StorageObjectRead, StorageObjectWrite):
         # actual gain of this plugin -- Snakemake can skip the whole
         # `stage_table` rule for a table that's already current, rather
         # than running it just to have it write a no-op receipt.
-        return is_current(self._engine, self.table_name, self._parquet_path())
+        # A Parquet that was never produced cannot be current; answering False
+        # lets Snakemake schedule its producer instead of failing to hash it.
+        parquet = self._parquet_path()
+        if not Path(parquet).exists():
+            return False
+        return is_current(self._engine, self.table_name, parquet)
 
     def mtime(self) -> float:
         # Must always be a finite, valid epoch timestamp (Snakemake uses it
