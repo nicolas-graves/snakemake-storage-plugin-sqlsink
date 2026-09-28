@@ -453,6 +453,23 @@ class SqlSink(V2SinkMixin):
             raise LookupError(f"table {table!r} has not been published in this sink; it cannot be a component source")
         return SinkTableSource(table, marker["update_id"], self.engine, schema=self.view_schema)
 
+    def reconcile(self, desired, authoritative: bool = False):
+        """Report drift against a complete desired state without mutation.
+
+        Publication intentionally never prunes omitted names. Call
+        ``report.prune(execute=True)`` only after reconciling the complete
+        registry with ``authoritative=True``. PostgreSQL is supported first;
+        DuckDB reconciliation is intentionally out of scope.
+        """
+        from .reconcile import reconcile
+
+        return reconcile(
+            self.engine,
+            desired,
+            authoritative=authoritative,
+            view_schema=self.view_schema or "public",
+        )
+
     def joined_relation(self, manifest: DatasetMaterialization, con: duckdb.DuckDBPyConnection) -> str:
         """The public compatibility view. On PostgreSQL it is read through
         DuckDB's postgres scanner (nothing is copied). On DuckDB the database
