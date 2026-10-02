@@ -13,10 +13,11 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from sqlalchemy import inspect, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import make_url
 
 from sqlsink import keep_old as ko
+from sqlsink.credentials import PgCredentials
 from sqlsink.manifest import ManifestError, load_manifest, load_manifests
 from sqlsink.publish import publish_tables
 from sqlsink.sink import materialize_v2
@@ -92,14 +93,17 @@ def test_pg_conninfo_forwards_the_dsn_tls_options():
     conninfo = pg_conninfo(url)
     assert "sslmode='verify-full'" in conninfo
     assert "sslrootcert='/etc/ca.pem'" in conninfo
-    assert "password='p\\'w\\\\x'" in conninfo
-    assert "host='db.example'" in conninfo and "port='5433'" in conninfo
+    # options only: the secret-borne parts never appear in the attach string
+    assert "p'w" not in conninfo and "p\\'w" not in conninfo
+    assert "user=" not in conninfo and "dbname=" not in conninfo
 
 
 def test_pg_conninfo_flattens_repeated_query_keys():
     # libpq takes a comma-separated host list for multi-host DSNs.
-    url = make_url("postgresql+psycopg://u@/an?host=h1&host=h2")
-    assert "host='h1,h2'" in pg_conninfo(url)
+    url = make_url("postgresql+psycopg://u:pw@/an?host=h1&host=h2")
+    conninfo = pg_conninfo(url)
+    assert conninfo == "host='h1,h2'"
+    assert "pw" not in conninfo and "user=" not in conninfo and "dbname=" not in conninfo
 
 
 @needs_pg
@@ -113,7 +117,40 @@ def test_pg_attach_error_does_not_leak_the_password():
     while chain[-1].__cause__ or chain[-1].__context__:
         chain.append(chain[-1].__cause__ or chain[-1].__context__)
     assert all("s3cr3t-not-the-password" not in str(e) for e in chain)
-    assert "password='***'" in str(err)
+
+
+@needs_pg
+def test_pg_attach_reads_through_the_secret():
+    u = make_url(PG_DSN)
+    url = PgCredentials(host=u.host, dbname=u.database, user=u.username, password=u.password, port=u.port).url()
+    con = duckdb.connect()
+    pg_attach(con, url, alias="viasecret")
+    assert con.execute("SELECT count(*) FROM viasecret.information_schema.tables").fetchone()[0] >= 0
+
+
+@needs_pg
+def test_pg_attach_survives_an_awkward_password():
+    import uuid
+
+    from sqlsink.sqlident import quote_ident, quote_literal
+
+    password = "p'a\\ss w=rd"
+    role = f"sqlsink_pw_{uuid.uuid4().hex[:8]}"
+    base = make_url(PG_DSN)
+    engine = create_engine(PG_DSN, isolation_level="AUTOCOMMIT")
+    try:
+        with engine.connect() as conn:
+            # standard_conforming_strings is on: backslashes are literal, only ' needs doubling
+            conn.execute(text(f"CREATE ROLE {quote_ident(role)} LOGIN PASSWORD {quote_literal(password)}"))
+            conn.execute(text(f"GRANT CONNECT ON DATABASE {quote_ident(base.database)} TO {quote_ident(role)}"))
+        con = duckdb.connect()
+        pg_attach(con, base.set(username=role, password=password), alias="awk")
+        assert con.execute("SELECT count(*) FROM awk.information_schema.tables").fetchone()[0] >= 0
+    finally:
+        with engine.connect() as conn:
+            conn.execute(text(f"REVOKE CONNECT ON DATABASE {quote_ident(base.database)} FROM {quote_ident(role)}"))
+            conn.execute(text(f"DROP ROLE IF EXISTS {quote_ident(role)}"))
+        engine.dispose()
 
 
 @needs_pg

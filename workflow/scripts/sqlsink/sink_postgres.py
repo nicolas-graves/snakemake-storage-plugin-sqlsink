@@ -24,7 +24,7 @@ from .publish import publish_datasets
 from .queries import parts_select_sql, view_select_sql, zone_select_sql
 from .sink import ContourSource, NormalizedDataset, default_spill_dir
 from .sink_v2 import V2SinkMixin
-from .sqlident import qualified, quote_ident
+from .sqlident import qualified, quote_ident, quote_literal
 from .stage import _DUCKDB_TO_SA, fetch_marker
 
 
@@ -153,45 +153,43 @@ def _libpq_value(value) -> str:
 
 
 def pg_conninfo(url) -> str:
-    """libpq keyword/value connection string for a SQLAlchemy PostgreSQL URL.
-
-    Every query parameter of the DSN (`sslmode`, `sslrootcert`, `options`,
-    `host=` for a socket directory, ...) is passed through, as the URL's own
-    driver gets it: dropping them would make the scanner connect with libpq's
-    defaults, i.e. without the TLS verification the DSN asks for. A repeated
-    key (multi-host DSN) is joined with commas, as libpq expects."""
-    pairs = [
-        ("dbname", url.database),
-        ("user", url.username),
-        ("password", url.password),
-        ("host", url.host),
-        ("port", url.port),
-    ]
-    for key, value in url.query.items():
-        pairs.append((key, ",".join(value) if isinstance(value, tuple) else value))
+    """libpq keyword/value string of the NON-secret connection options of a
+    SQLAlchemy PostgreSQL URL: only its query parameters (`sslmode`,
+    `sslrootcert`, `options`, `host=` for a socket directory, ...), as the
+    URL's own driver gets them; dropping them would make the scanner connect
+    with libpq's defaults, i.e. without the TLS verification the DSN asks
+    for. A repeated key (multi-host DSN) is joined with commas, as libpq
+    expects. Host, port, database, user and password are not here: they go in
+    a DuckDB secret (`pg_attach`), so no error message can echo them."""
+    pairs = [(key, ",".join(value) if isinstance(value, tuple) else value) for key, value in url.query.items()]
     return " ".join(f"{key}={_libpq_value(value)}" for key, value in pairs if value is not None)
 
 
 def pg_attach(con: duckdb.DuckDBPyConnection, url, alias: str = "pg") -> None:
-    """Attach a PostgreSQL database read-only to a DuckDB connection. A failed
-    attach is re-raised with the password masked: DuckDB's own message quotes
-    the whole connection string."""
+    """Attach a PostgreSQL database read-only to a DuckDB connection. The
+    credentials live in a temporary DuckDB secret and only the non-secret
+    options go in the ATTACH string, which is what DuckDB quotes in a failed
+    attach's message: the password never reaches it."""
     if not url.get_backend_name().startswith("postgres"):
         raise ValueError("a PostgreSQL URL is needed")
-    conninfo = pg_conninfo(url)
     con.execute("INSTALL postgres; LOAD postgres;")
-    escaped = conninfo.replace("'", "''")
-    try:
-        con.execute(f"ATTACH '{escaped}' AS {quote_ident(alias)} (TYPE postgres, READ_ONLY)")
-        return
-    except duckdb.Error as err:
-        error_type, message = type(err), str(err)
-    if url.password:
-        for secret in {str(url.password), _libpq_value(url.password)[1:-1]}:
-            message = message.replace(secret, "***")
-    # Raised outside the `except` block: the original exception must not ride
-    # along as `__context__` (which `from None` only hides from the printout).
-    raise error_type(message)
+    secret = quote_ident(f"sqlsink_{alias}")
+    parts = {
+        "HOST": url.host,
+        "PORT": url.port,
+        "DATABASE": url.database,
+        "USER": url.username,
+        "PASSWORD": url.password,
+    }
+    # PORT is an integer; the rest are string literals.
+    fields = ", ".join(
+        f"{key} {value if key == 'PORT' else quote_literal(value)}" for key, value in parts.items() if value is not None
+    )
+    con.execute(f"CREATE OR REPLACE TEMPORARY SECRET {secret} (TYPE postgres, {fields})")
+    # A `host` in the options string (multi-host / socket dir DSN) overrides
+    # the secret's HOST (checked on DuckDB 1.5.5), as libpq's own precedence.
+    options = quote_literal(pg_conninfo(url))
+    con.execute(f"ATTACH {options} AS {quote_ident(alias)} (TYPE postgres, SECRET {secret}, READ_ONLY)")
 
 
 class SqlSink(V2SinkMixin):
