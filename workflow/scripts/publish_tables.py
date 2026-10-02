@@ -2,10 +2,11 @@
 
 import json
 
+from sqlsink.credentials import resolve_url
 from sqlsink.engine import make_engine
 from sqlsink.publish import publish_tables
 
-engine = make_engine(snakemake.params.dsn)  # noqa: F821
+engine = make_engine(resolve_url(**snakemake.params.db))  # noqa: F821
 
 receipts = []
 for path in snakemake.input.receipts:  # noqa: F821

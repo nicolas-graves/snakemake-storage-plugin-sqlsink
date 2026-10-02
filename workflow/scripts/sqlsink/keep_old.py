@@ -308,7 +308,8 @@ def _forget_markers(conn, names: list[str]) -> None:
 def main(argv: list[str] | None = None) -> int:
     """`python -m sqlsink.keep_old {list,cleanup,rollback}`: operate on the
     relations a `keep_old` publish kept aside. The DSN comes from the
-    environment variable named by `--dsn-env` (default `SQLSINK_DSN`)."""
+    environment variable named by `--dsn-env` (default `SQLSINK_DSN`), or
+    from the credentials record at `--credentials` (which wins)."""
     import argparse
     import os
 
@@ -317,13 +318,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m sqlsink.keep_old", description=main.__doc__)
     parser.add_argument("action", choices=["list", "cleanup", "rollback"])
     parser.add_argument("--dsn-env", default="SQLSINK_DSN")
+    parser.add_argument("--credentials", metavar="PATH", help="credentials record (SOPS-encrypted or chmod 600)")
     parser.add_argument("--name", action="append", help="only this original relation (bare or schema.name); repeatable")
     parser.add_argument("--schema", action="append", help="only kept relations in this schema; repeatable")
     parser.add_argument("--lock-timeout", help="PostgreSQL lock_timeout, e.g. 45s (default: SQLSINK_LOCK_TIMEOUT)")
     args = parser.parse_args(argv)
-    dsn = os.environ.get(args.dsn_env)
-    if not dsn:
-        parser.error(f"environment variable {args.dsn_env} is not set")
+    if args.credentials:
+        from .credentials import resolve_url
+
+        dsn = resolve_url(credentials=args.credentials)
+    else:
+        dsn = os.environ.get(args.dsn_env)
+        if not dsn:
+            parser.error(f"environment variable {args.dsn_env} is not set")
     engine = make_engine(dsn)
     try:
         if args.action == "list":

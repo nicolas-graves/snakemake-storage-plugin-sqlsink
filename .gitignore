@@ -7,3 +7,7 @@ results/
 .codegraph/
 *.egg-info/
 build/
+
+# Credentials records: only SOPS-encrypted ones may be committed.
+secrets/*
+!secrets/*.sops.yaml

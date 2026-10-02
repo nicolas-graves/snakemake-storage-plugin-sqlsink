@@ -33,7 +33,9 @@ def main() -> int:
     parser.add_argument("--parquet-dir", default="results/parquet")
     parser.add_argument("--target", choices=("postgres", "duckdb"), default="postgres")
     parser.add_argument("--duckdb-path", default="results/sink.duckdb", help="DuckDB sink file")
-    parser.add_argument("--dsn", help="SQLAlchemy DSN; default: db.dsn from the config")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--credentials", metavar="PATH", help="credentials record; default: db from the config")
+    source.add_argument("--dsn", help="SQLAlchemy DSN; default: db from the config")
     parser.add_argument("--threads", type=int, default=2)
     parser.add_argument("--memory-limit", default="2500MB")
     parser.add_argument("--max-rss-mb", type=int, default=4500)
@@ -41,9 +43,11 @@ def main() -> int:
     args = parser.parse_args()
 
     config = yaml.safe_load(Path(args.config).read_text())
-    dsn = args.dsn or config.get("db", {}).get("dsn")
-    if args.target == "postgres" and not dsn:
-        parser.error("--target postgres needs --dsn or db.dsn in the config")
+    db = {"credentials": args.credentials} if args.credentials else {"dsn": args.dsn} if args.dsn else {
+        k: v for k, v in config.get("db", {}).items() if k in ("credentials", "dsn")
+    }
+    if args.target == "postgres" and len(db) != 1:
+        parser.error("--target postgres needs --credentials/--dsn, or exactly one of db.credentials / db.dsn in the config")
     manifests = [load_manifest(spec) for spec in config.get("datasets", [])]
     if args.dataset:
         unknown = set(args.dataset) - {m.name for m in manifests}
@@ -54,7 +58,7 @@ def main() -> int:
     sink = make_sink(
         {"type": "duckdb", "path": args.duckdb_path}
         if args.target == "duckdb"
-        else {"type": "postgres", "dsn": dsn}
+        else {"type": "postgres", **db}
     )
     failed = False
     for manifest in manifests:

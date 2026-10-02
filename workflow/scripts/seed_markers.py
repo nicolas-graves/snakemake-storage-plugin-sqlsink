@@ -18,7 +18,7 @@ table whose public state is subtly wrong would make the system believe
 it's current forever, until the Parquet changes again.
 
 Usage:
-    python seed_markers.py --dsn postgresql://... --table t1 --table t2 ...
+    python seed_markers.py --credentials secrets/db.sops.yaml --table t1 --table t2 ...
     python seed_markers.py --dsn postgresql://... --tables-file seeded_tables.txt
 """
 
@@ -30,6 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from sqlsink.credentials import resolve_url  # noqa: E402
 from sqlsink.engine import make_engine  # noqa: E402
 from sqlsink.fingerprint import compute_update_id_for_file  # noqa: E402
 from sqlsink.metadata import analytics_table_updates, create_all  # noqa: E402
@@ -78,7 +79,9 @@ def seed_table(engine, table_name: str, parquet_path: str, verify_only: bool = F
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dsn", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--credentials", metavar="PATH", help="SOPS-encrypted (or chmod 600) credentials record")
+    source.add_argument("--dsn")
     parser.add_argument("--parquet-dir", default="results/parquet")
     parser.add_argument("--table", action="append", default=[], help="repeatable")
     parser.add_argument("--tables-file", help="one table name per line")
@@ -93,7 +96,7 @@ def main() -> None:
     if not tables:
         parser.error("provide at least one --table or --tables-file")
 
-    engine = make_engine(args.dsn)
+    engine = make_engine(resolve_url(credentials=args.credentials, dsn=args.dsn))
     create_all(engine)
 
     for table_name in tables:

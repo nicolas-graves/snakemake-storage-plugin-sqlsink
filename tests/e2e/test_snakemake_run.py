@@ -21,6 +21,7 @@ import duckdb
 import pytest
 import yaml
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 
 from sqlsink.engine import make_engine
 
@@ -139,7 +140,15 @@ def project(tmp_path):
     (tmp_path / "config").mkdir()
     (tmp_path / "results" / "parquet").mkdir(parents=True)
     (tmp_path / "workflow").symlink_to(WORKFLOW)
-    (tmp_path / "config" / "config.yaml").write_text(yaml.safe_dump({**CONFIG, "db": {"dsn": DSN}}))
+    # A credentials record (not a DSN), so the password must stay out of Snakemake's state.
+    url = make_url(DSN)
+    record = tmp_path / "secrets" / "db.yaml"
+    record.parent.mkdir()
+    record.write_text(yaml.safe_dump(
+        {"host": url.host, "port": url.port, "dbname": url.database, "user": url.username, "password": url.password}
+    ))
+    record.chmod(0o600)
+    (tmp_path / "config" / "config.yaml").write_text(yaml.safe_dump({**CONFIG, "db": {"credentials": str(record)}}))
     _wipe_postgres()
     _write_parquet(tmp_path, 1)
     proj = Project(tmp_path)
@@ -154,6 +163,13 @@ def test_a_first_run_publishes_tables_and_datasets_to_both_sinks(project):
 
 def test_an_unchanged_rerun_does_nothing(project):
     assert "Nothing to be done" in project.run()
+
+
+def test_the_password_never_reaches_snakemakes_state(project):
+    password = make_url(DSN).password.encode()
+    files = [p for p in (project.root / ".snakemake").rglob("*") if p.is_file()]
+    assert files
+    assert [p for p in files if password in p.read_bytes()] == []
 
 
 def test_a_changed_input_republishes_into_the_existing_databases(project):

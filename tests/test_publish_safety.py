@@ -490,6 +490,23 @@ def test_keep_old_cli(engine, parquet_dir, monkeypatch, capsys):
 
 
 @needs_pg
+def test_keep_old_cli_reads_a_credentials_record(engine, parquet_dir, tmp_path, capsys):
+    import yaml
+
+    publish_tables(engine, [stage_table(engine, "fake_a", str(parquet_dir["fake_a"])).to_dict()])
+    _change(parquet_dir["fake_a"], [(1, "v2", 1.0)])
+    publish_tables(engine, [stage_table(engine, "fake_a", str(parquet_dir["fake_a"])).to_dict()], keep_old=True)
+    u = engine.url
+    record = tmp_path / "db.yaml"
+    record.write_text(yaml.safe_dump(
+        {"host": u.host, "port": u.port, "dbname": u.database, "user": u.username, "password": u.password}
+    ))
+    record.chmod(0o600)
+    assert ko.main(["list", "--credentials", str(record)]) == 0
+    assert "__old__fake_a (table)" in capsys.readouterr().out
+
+
+@needs_pg
 def test_keep_old_refuses_an_identifier_postgres_would_truncate(engine):
     long_name = "x" * 60
     with engine.begin() as conn:

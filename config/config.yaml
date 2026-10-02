@@ -2,11 +2,21 @@ tables:
   - table_01
   # ... full list of 37 table names goes here
 
-# PostgreSQL DSN (production sink). The local sink is a DuckDB file:
-# select it with `sinks: [duckdb]` and `duckdb_sink_path: results/sink.duckdb`.
+# PostgreSQL credentials (production sink): a path to a record with the fields
+# host, port, dbname, user, password, sslmode (+ optional sslrootcert, sslcert,
+# sslkey, options); see config/db.credentials.example.yaml. The record is
+# SOPS-encrypted (or chmod 600 plaintext, for a local test DB only), so the
+# password never appears in the config, the logs or Snakemake's metadata.
+# Create it with:
+#   sops --encrypt --age <pubkey> plain.yaml > secrets/db.sops.yaml
+# (or `sops --encrypt plain.yaml > ...` with a creation rule in .sops.yaml).
+# The local sink is a DuckDB file: select it with `sinks: [duckdb]` and
+# `duckdb_sink_path: results/sink.duckdb`.
 # `sinks:` defaults to [postgres]; list both to publish to both.
 db:
-  dsn: "postgresql+psycopg://user:pass@localhost:5432/analytics"
+  credentials: secrets/db.sops.yaml
+  # Alternative with no secret, e.g. a local DuckDB sink for the per-table path:
+  # dsn: "duckdb:///results/sink.duckdb"
 
 loader_version: 1
 

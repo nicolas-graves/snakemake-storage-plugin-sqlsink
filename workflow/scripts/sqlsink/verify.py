@@ -17,6 +17,7 @@ import resource
 from dataclasses import dataclass, field
 
 import duckdb
+from sqlalchemy.engine import URL
 
 from .manifest import DatasetMaterialization
 from .queries import fetch_row
@@ -215,7 +216,7 @@ def verify_sink(
 def verify_dataset(
     manifest: DatasetMaterialization,
     fact_parquet_path: str,
-    sqlalchemy_dsn: str,
+    sqlalchemy_dsn: str | URL,
     *,
     view_schema: str = "public",
     threads: int = 2,
@@ -229,7 +230,7 @@ def verify_dataset(
 
     from .sink_postgres import pg_attach
 
-    url = make_url(sqlalchemy_dsn)
+    url = make_url(sqlalchemy_dsn) if isinstance(sqlalchemy_dsn, str) else sqlalchemy_dsn
     if not url.get_backend_name().startswith("postgres"):
         raise ValueError("verify_dataset needs a PostgreSQL DSN")
     con = duckdb.connect()

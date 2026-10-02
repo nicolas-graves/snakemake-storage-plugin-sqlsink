@@ -2,10 +2,11 @@
 
 import json
 
+from sqlsink.credentials import resolve_url
 from sqlsink.engine import make_engine
 from sqlsink.stage import stage_table
 
-engine = make_engine(snakemake.params.dsn)  # noqa: F821
+engine = make_engine(resolve_url(**snakemake.params.db))  # noqa: F821
 receipt = stage_table(engine, snakemake.params.table, snakemake.input.parquet)  # noqa: F821
 
 with open(snakemake.output.receipt, "w") as f:  # noqa: F821

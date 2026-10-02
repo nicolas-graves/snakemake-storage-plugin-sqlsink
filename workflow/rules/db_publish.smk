@@ -21,11 +21,15 @@ should depend on the `published/{table}` storage objects, not on any
 individual table's staging receipt.
 
 This module is written against SQLAlchemy Core throughout (see
-`workflow/scripts/sqlsink/`), so `config["db"]["dsn"]` can point at
-any SQLAlchemy-supported engine, not just PostgreSQL.
+`workflow/scripts/sqlsink/`), so `config["db"]["dsn"]` (no secret) can point at
+any SQLAlchemy-supported engine; `config["db"]["credentials"]` (a SOPS record
+path) is PostgreSQL only.
 """
 
 TABLES = config["tables"]
+# Paths / no-secret values only: a credentials file is never a rule input (so
+# rotating it triggers no rerun) and its content never reaches params.
+DB = {k: v for k, v in config["db"].items() if k in ("credentials", "dsn")}
 
 # Logical datasets with a normalized PostgreSQL materialization (compact
 # fact table + shared contour table + public compatibility view), per
@@ -55,7 +59,8 @@ def _dataset_parquets(wildcards):
 
 storage sqlsink:
     provider="sqlsink",
-    dsn=config["db"]["dsn"],
+    credentials=config["db"].get("credentials"),
+    dsn=config["db"].get("dsn"),
     parquet_dir="results/parquet",
 
 
@@ -72,7 +77,7 @@ rule stage_table:
     output:
         receipt=storage.sqlsink("{table}"),
     params:
-        dsn=config["db"]["dsn"],
+        db=DB,
         table="{table}",
     script:
         "../scripts/stage_table.py"
@@ -90,7 +95,7 @@ rule publish_tables:
     output:
         published=storage.sqlsink(expand("published/{table}", table=TABLES)),
     params:
-        dsn=config["db"]["dsn"],
+        db=DB,
     script:
         "../scripts/publish_tables.py"
 
@@ -116,7 +121,7 @@ rule publish_tables:
 # both Parquets and the manifest and decides "current" vs "staged", so a
 # re-run for an unchanged dataset is a cheap no-op.
 SINK_SPECS = {
-    "postgres": {"type": "postgres", "dsn": config["db"]["dsn"]},
+    "postgres": {"type": "postgres", **DB},
     "duckdb": {"type": "duckdb", "path": config.get("duckdb_sink_path", "results/sink.duckdb")},
 }
 SINKS = config.get("sinks", ["postgres"])
@@ -216,7 +221,7 @@ rule cleanup_kept_old:
     output:
         report="results/kept_old_cleanup.json",
     params:
-        dsn=config["db"]["dsn"],
+        db=DB,
         lock_timeout=None,
     script:
         "../scripts/cleanup_kept_old.py"
@@ -226,7 +231,7 @@ rule rollback_kept_old:
     output:
         report="results/kept_old_rollback.json",
     params:
-        dsn=config["db"]["dsn"],
+        db=DB,
         lock_timeout=None,
     script:
         "../scripts/rollback_kept_old.py"
