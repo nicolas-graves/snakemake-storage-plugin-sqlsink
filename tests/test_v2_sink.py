@@ -280,6 +280,29 @@ def test_component_republished_elsewhere_after_staging_is_a_conflict(engine, sin
         publish_v2(sink, [a, b], stale)
 
 
+def test_partial_restage_with_stale_staged_receipts_of_a_published_dataset(engine, sink, shared_sources):
+    """The incident: receipts left "staged" by an earlier publish must not fail a later partial one."""
+    a, b = load_manifests(SHARED)
+    old = stage_all(sink, [a, b], shared_sources)
+    publish_v2(sink, [a, b], old)
+    write_table(shared_sources["facts_b"], "id INTEGER, k VARCHAR, w INTEGER", [(7, "y", 71)])
+    new_b = stage_v2(normalize_v2(b, shared_sources, sink=sink), sink)
+    assert [r.status for r in old[0].components if r.component == "dim"] == ["staged"]
+    assert publish_v2(sink, [a, b], [old[0], new_b]) == ["ds_b"]
+    assert rows(engine, "SELECT w FROM ds_b") == [(71,)]
+    assert rows(engine, "SELECT label FROM ds_a ORDER BY id") == [("old-x",), ("old-y",)]
+    assert leftover_old_tables(engine) == []
+
+
+def test_publishing_the_same_receipts_twice_is_a_noop(engine, sink, shared_sources):
+    a, b = load_manifests(SHARED)
+    results = stage_all(sink, [a, b], shared_sources)
+    assert publish_v2(sink, [a, b], results) == ["ds_a", "ds_b"]
+    assert publish_v2(sink, [a, b], results) == []
+    assert publish_v2(sink, [a, b], results, refresh=True) == []
+    assert rows(engine, "SELECT label FROM ds_b") == [("old-y",)]
+
+
 def test_inner_join_orphans_are_rejected_before_anything_is_written(engine, sink, tmp_path):
     d = tmp_path / "orph"
     sources = {

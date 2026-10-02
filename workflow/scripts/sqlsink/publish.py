@@ -45,6 +45,44 @@ def _refresh_markers(conn, table, pk_col: str, names: list[str]) -> None:
         conn.execute(update(table).where(table.c[pk_col].in_(names)).values(published_at=func.now()))
 
 
+def _demote_published(
+    conn,
+    receipts: list[dict],
+    marker_table,
+    key_col: str,
+    receipt_key: str,
+    version_col: str = "update_id",
+    receipt_version: str = "update_id",
+    live_exists=None,
+) -> list[dict]:
+    """`receipts` with every "staged" one whose version already is the live
+    marker's rewritten to "current" (a copy). Swapping it would be a no-op and
+    its staging table is gone, so a receipt left on disk by an earlier publish
+    must not be published again. A staged receipt for any other version is left
+    alone and still hits the usual conflict checks. `live_exists(receipt)`, if
+    given, must also hold: a marker that outlived a dropped relation is not
+    "already published". Call under the publish lock."""
+    keys = [r[receipt_key] for r in receipts if r["status"] == "staged"]
+    if not keys:
+        return list(receipts)
+    live = dict(
+        conn.execute(
+            select(marker_table.c[key_col], marker_table.c[version_col]).where(marker_table.c[key_col].in_(keys))
+        ).all()
+    )
+    out = []
+    for r in receipts:
+        if (
+            r["status"] == "staged"
+            and live.get(r[receipt_key]) == r[receipt_version]
+            and (live_exists is None or live_exists(r))
+        ):
+            log.info("%s %r already published, skipping", receipt_key, r[receipt_key])
+            r = dict(r, status="current")
+        out.append(r)
+    return out
+
+
 def publish_tables(
     engine,
     receipts: list[dict],
@@ -75,9 +113,11 @@ def publish_tables(
     `analyze` (default on; `SQLSINK_ANALYZE=0` to disable) runs `ANALYZE` on
     every table actually published, on PostgreSQL only, after the publish
     transaction has committed (see `_analyze_relations`).
+
+    A staged receipt whose version is already live is treated as current, which
+    makes a publish idempotent over receipts left on disk by an earlier publish.
     """
-    staged = [r for r in receipts if r["status"] == "staged"]
-    if not staged and not refresh:
+    if not any(r["status"] == "staged" for r in receipts) and not refresh:
         return []
     keep = resolve_keep_old(keep_old)
     lock_timeout = resolve_lock_timeout(lock_timeout)
@@ -91,6 +131,12 @@ def publish_tables(
     with engine.begin() as conn:
         apply_lock_timeout(conn, lock_timeout)
         with advisory_lock(conn, PUBLISH_LOCK_KEY, transactional=True):
+            insp = inspect(conn)
+            receipts = _demote_published(
+                conn, receipts, meta_mod.analytics_table_updates, "table_name", "table",
+                live_exists=lambda r: insp.has_table(r["table"]),
+            )
+            staged = [r for r in receipts if r["status"] == "staged"]
             inspector = inspect(conn)
             for receipt in staged:
                 table_name = receipt["table"]
@@ -259,14 +305,16 @@ def publish_datasets(
     fact, contour and zone table is analyzed; a swapped-in v2 public
     relation is too, unless it is a plain view (nothing to analyze -- its
     components already are) rather than a table or materialized view.
+
+    A staged receipt whose version is already live is treated as current (see
+    `publish_tables`), so a partial restage publishes only what really changed.
     """
     component_receipts = list(component_receipts)
-    staged_contours = {r["contour_table"]: r for r in contour_receipts if r["status"] == "staged"}
-    staged_components = {r["component"]: r for r in component_receipts if r["status"] == "staged"}
-    staged_all = [r for r in dataset_receipts if r["status"] == "staged"]
-    staged_datasets = [r for r in staged_all if r.get("kind") != "dataset_v2"]
-    staged_views = [r for r in staged_all if r.get("kind") == "dataset_v2"]
-    if not staged_contours and not staged_datasets and not staged_components and not staged_views and not refresh:
+    contour_receipts = list(contour_receipts)
+    dataset_receipts = list(dataset_receipts)
+    if not refresh and not any(
+        r["status"] == "staged" for r in (*contour_receipts, *component_receipts, *dataset_receipts)
+    ):
         return []
     keep = resolve_keep_old(keep_old)
     lock_timeout = resolve_lock_timeout(lock_timeout)
@@ -288,6 +336,37 @@ def publish_datasets(
         apply_lock_timeout(conn, lock_timeout)
         with advisory_lock(conn, PUBLISH_LOCK_KEY, transactional=True):
             dialect = conn.engine.dialect.name
+
+            insp = inspect(conn)
+
+            def physical_exists(bare, schema):
+                name, sch = meta_mod.physical_name_and_schema(dialect, bare, schema)
+                return insp.has_table(name, schema=sch)
+
+            def public_exists(r):
+                return r["dataset"] in set(insp.get_table_names()) | set(insp.get_view_names()) | (
+                    set(insp.get_materialized_view_names()) if dialect == "postgresql" else set()
+                )
+
+            contour_receipts = _demote_published(
+                conn, contour_receipts, meta_mod.contour_updates, "contour_table", "contour_table",
+                "contour_sha256", "contour_sha256",
+                live_exists=lambda r: r["contour_table"] not in contour_schema
+                or physical_exists(r["contour_table"], contour_schema[r["contour_table"]]),
+            )
+            component_receipts = _demote_published(
+                conn, component_receipts, meta_mod.component_updates, "component_name", "component",
+                live_exists=lambda r: physical_exists(r["component"], r["schema"]),
+            )
+            dataset_receipts = _demote_published(
+                conn, dataset_receipts, meta_mod.analytics_dataset_updates, "dataset_name", "dataset",
+                live_exists=public_exists,
+            )
+            staged_contours = {r["contour_table"]: r for r in contour_receipts if r["status"] == "staged"}
+            staged_components = {r["component"]: r for r in component_receipts if r["status"] == "staged"}
+            staged_all = [r for r in dataset_receipts if r["status"] == "staged"]
+            staged_datasets = [r for r in staged_all if r.get("kind") != "dataset_v2"]
+            staged_views = [r for r in staged_all if r.get("kind") == "dataset_v2"]
 
             _assert_keyed_dependents_restaged(v1_manifests, staged_contours, staged_datasets)
             _assert_view_dependents_restaged(conn, v2_by_name, staged_components, staged_views)

@@ -31,7 +31,7 @@ from sqlsink.engine import (
     resolve_lock_timeout,
 )
 from sqlsink.manifest import load_manifest
-from sqlsink.publish import PUBLISH_LOCK_KEY, publish_tables
+from sqlsink.publish import PUBLISH_LOCK_KEY, PublishConflict, publish_tables
 from sqlsink.sink import dataset_is_published, normalize_v2, publish_v2, stage_v2
 from sqlsink.sink_postgres import SqlSink
 from sqlsink.stage import fetch_marker, stage_table
@@ -296,6 +296,21 @@ def test_lock_timeout_from_the_environment_bounds_a_dataset_publish(engine, tmp_
 def test_publish_accepts_a_lock_timeout_on_every_dialect(engine, parquet_dir):
     receipt = stage_table(engine, "fake_a", str(parquet_dir["fake_a"])).to_dict()
     assert publish_tables(engine, [receipt], lock_timeout="30s") == ["fake_a"]
+
+
+def test_publishing_an_already_published_table_receipt_again_is_a_noop(engine, parquet_dir):
+    receipt = stage_table(engine, "fake_a", str(parquet_dir["fake_a"])).to_dict()
+    assert publish_tables(engine, [receipt]) == ["fake_a"]
+    assert publish_tables(engine, [receipt]) == []  # its staging table is gone: must not be swapped again
+    assert publish_tables(engine, [receipt], refresh=True) == []
+
+
+def test_stale_staged_table_receipt_of_another_version_still_conflicts(engine, parquet_dir):
+    stale = stage_table(engine, "fake_a", str(parquet_dir["fake_a"])).to_dict()
+    _change(parquet_dir["fake_a"], [(1, "v2", 1.0)])
+    publish_tables(engine, [stage_table(engine, "fake_a", str(parquet_dir["fake_a"])).to_dict()])
+    with pytest.raises(PublishConflict):
+        publish_tables(engine, [stale])
 
 
 # -- 3. keep_old ------------------------------------------------------------------------
