@@ -174,3 +174,151 @@ def test_resolve_url(tmp_path):
         resolve_url(credentials=p, dsn="postgresql://x")
     assert resolve_url(dsn="postgresql://x/y") == "postgresql://x/y"
     assert resolve_url(credentials=p).host == "db.example"
+
+
+# --- references into a shared document -------------------------------------
+
+PEM = "-----BEGIN CERTIFICATE-----\nMIIBdummy\n-----END CERTIFICATE-----\n"
+SECTION = "superset-analytics-database"
+SHARED = {
+    # not a valid record on its own: must be ignored by a fragment reference
+    "francetravail": {"client_id": "x", "bogus": [1, 2]},
+    "stray": "scalar",
+    SECTION: {
+        "host": "pg.example.net",
+        "port": 20184,
+        "database": "superset_analytics",
+        "ca_path": "/run/secrets/analytics-database-ca.pem",
+        "ca": PEM,
+        "loader": {"username": "loader_role", "password": PW},
+        "runtime": {"username": "runtime_role", "password": "runtime-pw"},
+    },
+}
+
+
+def _shared(tmp_path, doc=None):
+    return _write(tmp_path / "all.yaml", json.dumps(SHARED if doc is None else doc))
+
+
+def test_fragment_merge(tmp_path):
+    p = _shared(tmp_path)
+    c = load_credentials(f"{p}#{SECTION}.loader")
+    assert (c.host, c.port, c.dbname) == ("pg.example.net", 20184, "superset_analytics")
+    assert (c.user, c.password) == ("loader_role", PW)
+    rt = load_credentials(f"{p}#{SECTION}.runtime")
+    assert (rt.user, rt.password) == ("runtime_role", "runtime-pw")
+
+
+def test_aliases_and_conflict(tmp_path):
+    p = _write(tmp_path / "a.yaml", json.dumps({"host": "h", "database": "d", "username": "u", "password": PW}))
+    c = load_credentials(p)
+    assert (c.dbname, c.user) == ("d", "u")
+    p2 = _write(tmp_path / "b.yaml", json.dumps({**GOOD, "database": "other"}))
+    with pytest.raises(CredentialsError, match="database.*dbname") as ei:
+        load_credentials(p2)
+    assert PW not in str(ei.value)
+
+
+def test_missing_path_key(tmp_path):
+    p = _shared(tmp_path)
+    with pytest.raises(CredentialsError, match=rf"no key '{SECTION}\.nope'") as ei:
+        load_credentials(f"{p}#{SECTION}.nope")
+    assert PW not in str(ei.value)
+    with pytest.raises(CredentialsError, match="no key 'absent'"):
+        load_credentials(f"{p}#absent")
+
+
+def test_inline_ca_materialised(tmp_path):
+    p = _shared(tmp_path)
+    c = load_credentials(f"{p}#{SECTION}.loader")
+    ca = c.sslrootcert
+    assert ca != "/run/secrets/analytics-database-ca.pem"
+    assert open(ca).read() == PEM
+    assert os.stat(ca).st_mode & 0o777 == 0o600
+    assert os.stat(os.path.dirname(ca)).st_mode & 0o777 == 0o700
+    assert c.sslmode == "verify-full"
+    assert dict(c.url().query)["sslrootcert"] == ca
+    # explicit sslmode is kept; ca_path alone also defaults to verify-full
+    doc = {**GOOD, "ca_path": "/ca.pem"}
+    assert load_credentials(_write(tmp_path / "x.yaml", json.dumps(doc))).sslmode == "verify-full"
+    doc = {**GOOD, "ca": PEM, "sslmode": "verify-ca"}
+    assert load_credentials(_write(tmp_path / "y.yaml", json.dumps(doc))).sslmode == "verify-ca"
+
+
+def test_inline_ca_must_be_pem(tmp_path):
+    p = _write(tmp_path / "c.yaml", json.dumps({**GOOD, "ca": "not a certificate"}))
+    with pytest.raises(CredentialsError, match="PEM") as ei:
+        load_credentials(p)
+    assert "not a certificate" not in str(ei.value) and PW not in str(ei.value)
+
+
+def test_query_overrides(tmp_path):
+    p = _shared(tmp_path)
+    c = load_credentials(f"{p}#{SECTION}.loader?hostaddr=127.0.0.1&port=15432")
+    assert (c.host, c.hostaddr, c.port) == ("pg.example.net", "127.0.0.1", 15432)
+    assert dict(c.url().query)["hostaddr"] == "127.0.0.1"
+    # no fragment: the query follows the path directly
+    q = _write(tmp_path / "q.yaml", json.dumps(GOOD))
+    assert load_credentials(f"{q}?port=1&sslmode=require").sslmode == "require"
+    for bad in ("password=x", "user=x", "username=x", "ca=x", "bogus=1", "port"):
+        with pytest.raises(CredentialsError) as ei:
+            load_credentials(f"{p}#{SECTION}.loader?{bad}")
+        assert PW not in str(ei.value) and "=x" not in str(ei.value)
+
+
+def _fake_sops(calls, doc=SHARED):
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if "--extract" in cmd:
+            key = json.loads(cmd[cmd.index("--extract") + 1])[0]
+            return SimpleNamespace(returncode=0, stdout=json.dumps(doc[key]), stderr="")
+        return SimpleNamespace(returncode=0, stdout=json.dumps(doc), stderr="")
+
+    return fake_run
+
+
+def test_sops_extract_command_and_memoisation(tmp_path, monkeypatch):
+    p = _sops_file(tmp_path)
+    calls = []
+    monkeypatch.setattr(cred.subprocess, "run", _fake_sops(calls))
+    load_credentials(f"{p}#{SECTION}.loader")
+    assert calls[0] == ["sops", "--decrypt", "--output-type", "json",
+                        "--extract", f'["{SECTION}"]', str(p)]
+    load_credentials(f"{p}#{SECTION}.runtime")
+    assert len(calls) == 1  # same section: one sops call
+    # no fragment: no --extract
+    calls.clear()
+    monkeypatch.setattr(cred.subprocess, "run", _fake_sops(calls, GOOD))
+    load_credentials(p)
+    assert "--extract" not in calls[0]
+
+
+def test_sqlsink_sops_env(tmp_path, monkeypatch):
+    p = _sops_file(tmp_path)
+    calls = []
+    monkeypatch.setattr(cred.subprocess, "run", _fake_sops(calls, GOOD))
+    monkeypatch.setenv("SQLSINK_SOPS", "/opt/pinned/sops")
+    load_credentials(p)
+    assert calls[0][0] == "/opt/pinned/sops"
+
+
+@pytest.mark.skipif(
+    not (shutil.which("sops") and shutil.which("age-keygen")),
+    reason="needs sops and age-keygen",
+)
+def test_real_sops_shared_document(tmp_path, monkeypatch):
+    key = tmp_path / "key.txt"
+    subprocess.run(["age-keygen", "-o", str(key)], capture_output=True, text=True, check=True)
+    pub = next(l.split()[-1] for l in key.read_text().splitlines() if "public key:" in l)
+    plain = _write(tmp_path / "plain.yaml", json.dumps(SHARED))
+    enc = tmp_path / "all.sops.yaml"
+    subprocess.run(
+        ["sops", "--encrypt", "--age", pub, "--input-type", "yaml", "--output-type", "yaml",
+         "--output", str(enc), str(plain)],
+        check=True, cwd=tmp_path, capture_output=True,
+    )
+    monkeypatch.setenv("SOPS_AGE_KEY_FILE", str(key))
+    c = load_credentials(f"{enc}#{SECTION}.loader")
+    assert (c.host, c.port, c.dbname, c.user, c.password) == (
+        "pg.example.net", 20184, "superset_analytics", "loader_role", PW)
+    assert open(c.sslrootcert).read() == PEM

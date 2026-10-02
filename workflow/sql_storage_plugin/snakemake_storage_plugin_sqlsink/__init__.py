@@ -79,7 +79,7 @@ def split_query(query: str) -> tuple[str, str]:
 class StorageProviderSettings(StorageProviderSettingsBase):
     credentials: Optional[str] = field(
         default=None,
-        metadata={"help": "Path of a SOPS-encrypted (or chmod 600 plaintext) PostgreSQL credentials record (host, port, dbname, user, password, sslmode, ...). Preferred over dsn for PostgreSQL: the password never enters Snakemake's metadata."},
+        metadata={"help": "Reference to a SOPS-encrypted (or chmod 600 plaintext) PostgreSQL credentials record: PATH[#section.role][?hostaddr=...&port=...]. PATH alone uses the whole document (host, port, dbname, user, password, sslmode, ...); #a.b merges the plain fields of each level along the path, so one shared document can hold several roles; an inline `ca` PEM is materialised as sslrootcert; the query overrides non-secret fields only. A # or ? inside the file path is not supported. Preferred over dsn for PostgreSQL: the password never enters Snakemake's metadata."},
     )
     dsn: Optional[str] = field(
         default=None,

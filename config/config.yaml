@@ -7,6 +7,11 @@ tables:
 # sslkey, options); see config/db.credentials.example.yaml. The record is
 # SOPS-encrypted (or chmod 600 plaintext, for a local test DB only), so the
 # password never appears in the config, the logs or Snakemake's metadata.
+# The value is a reference PATH[#section.role][?hostaddr=...&port=...]: with
+# `#section.role` the record is read from inside a shared SOPS document
+# (e.g. secrets/all.sops.yaml#superset-analytics-database.loader), merging the
+# plain fields of each level; an inline `ca` PEM is supported. A `#` or `?`
+# in the file path itself is not supported.
 # Create it with:
 #   sops --encrypt --age <pubkey> plain.yaml > secrets/db.sops.yaml
 # (or `sops --encrypt plain.yaml > ...` with a creation rule in .sops.yaml).

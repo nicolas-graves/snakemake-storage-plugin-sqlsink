@@ -265,3 +265,15 @@ def test_restore_grants_replays_known_privileges():
         'GRANT SELECT ON TABLE "public"."t" TO "reader"',
         'GRANT SELECT ON TABLE "public"."t" TO PUBLIC',
     ]
+
+
+@needs_pg
+def test_pg_attach_hostaddr_from_a_record():
+    u = make_url(PG_DSN)
+    url = PgCredentials(
+        host="localhost", hostaddr="127.0.0.1", dbname=u.database, user=u.username, password=u.password, port=u.port
+    ).url()
+    assert pg_conninfo(url) == "hostaddr='127.0.0.1'"
+    con = duckdb.connect()
+    pg_attach(con, url, alias="viahostaddr")
+    assert con.execute("SELECT count(*) FROM viahostaddr.information_schema.tables").fetchone()[0] >= 0
