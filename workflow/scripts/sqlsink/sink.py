@@ -386,8 +386,8 @@ def materialize_v2(
 
 
 def make_sink(spec: dict, *, create_markers: bool = True) -> Sink:
-    """Build a sink from a config mapping: `{"type": "postgres", "dsn": ...}`
-    or `{"type": "duckdb", "path": ...}`. A DuckDB spec may add
+    """Build a sink from a config mapping: `{"type": "postgres", "credentials": <record path>}`
+    (or `"dsn"`, exactly one of the two) or `{"type": "duckdb", "path": ...}`. A DuckDB spec may add
     `"schema": "public"`: the default schema (created if missing) of every
     connection, so views and markers land there rather than in `main`.
     `create_markers=False` (read-only callers) leaves a DuckDB file without its
@@ -399,7 +399,9 @@ def make_sink(spec: dict, *, create_markers: bool = True) -> Sink:
         from .sink_postgres import SqlSink
 
         if kind == "postgres":
-            return SqlSink(make_engine(spec["dsn"]))
+            from .credentials import resolve_url
+
+            return SqlSink(make_engine(resolve_url(credentials=spec.get("credentials"), dsn=spec.get("dsn"))))
         from .metadata import create_all
 
         engine = make_engine(f"duckdb:///{spec['path']}")

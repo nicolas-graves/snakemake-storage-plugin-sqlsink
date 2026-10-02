@@ -5,6 +5,7 @@ StorageObject instance (no full Snakemake DAG needed for this level).
 from __future__ import annotations
 
 import logging
+import os
 
 import pytest
 
@@ -223,15 +224,15 @@ def _provider(tmp_path, engine=None, **kw):
 
 
 def test_dsn_from_file_and_env(tmp_path, monkeypatch):
-    from snakemake_storage_plugin_sqlsink import resolve_dsn
+    from snakemake_storage_plugin_sqlsink import resolve_url
 
     f = tmp_path / "dsn"
     f.write_text(f"duckdb:///{tmp_path / 'a.duckdb'}\n")
-    assert resolve_dsn(StorageProviderSettings(dsn_file=str(f))).endswith("a.duckdb")
+    assert resolve_url(StorageProviderSettings(dsn_file=str(f))).endswith("a.duckdb")
     monkeypatch.setenv("SQLSINK_TEST_DSN", "duckdb:///:memory:")
-    assert resolve_dsn(StorageProviderSettings(dsn_env="SQLSINK_TEST_DSN")) == "duckdb:///:memory:"
-    with pytest.raises(ValueError):
-        resolve_dsn(StorageProviderSettings())
+    assert resolve_url(StorageProviderSettings(dsn_env="SQLSINK_TEST_DSN")) == "duckdb:///:memory:"
+    with pytest.raises(ValueError, match="credentials"):
+        resolve_url(StorageProviderSettings())
     p = _provider(tmp_path, dsn_file=str(f))
     assert p.reachable
 
@@ -317,3 +318,68 @@ def test_publish_without_refresh_leaves_current_markers_alone(engine, parquet_di
     again = [stage_table(engine, "fake_a", str(parquet_dir["fake_a"])).to_dict()]
     assert publish_tables(engine, again) == []
     assert fetch_marker(engine, "fake_a") == before
+
+
+# -- credentials ------------------------------------------------------------
+
+PG_DSN = os.environ.get("SNAKEMAKE_SQL_TEST_PG_DSN")
+needs_pg = pytest.mark.skipif(not PG_DSN, reason="needs SNAKEMAKE_SQL_TEST_PG_DSN (a disposable PostgreSQL)")
+
+
+@pytest.fixture
+def creds_file(tmp_path):
+    """A chmod-600 plaintext credentials record for the test PostgreSQL."""
+    import yaml
+    from sqlalchemy.engine import make_url
+    from sqlsink.credentials import load_credentials
+
+    load_credentials.cache_clear()
+    u = make_url(PG_DSN)
+    f = tmp_path / "pg.yaml"
+    f.write_text(yaml.safe_dump({"host": u.host, "port": u.port, "dbname": u.database, "user": u.username, "password": u.password}))
+    f.chmod(0o600)
+    yield f
+    load_credentials.cache_clear()
+
+
+def test_credentials_beat_dsn(tmp_path):
+    from snakemake_storage_plugin_sqlsink import resolve_url
+    from sqlsink.credentials import CredentialsError
+
+    # credentials wins, so the (valid) dsn is never consulted: the missing record is the error
+    with pytest.raises(CredentialsError):
+        resolve_url(StorageProviderSettings(credentials=str(tmp_path / "nope.yaml"), dsn="duckdb:///:memory:"))
+
+
+def test_missing_credentials_is_hard_error_even_if_treat_missing(tmp_path):
+    from sqlsink.credentials import CredentialsError
+
+    with pytest.raises(CredentialsError):
+        _provider(tmp_path, credentials=str(tmp_path / "nope.yaml"), on_unreachable="treat-missing")
+
+
+@needs_pg
+def test_provider_from_credentials(tmp_path, creds_file):
+    from sqlalchemy import text
+    from sqlalchemy.engine import make_url
+
+    p = _provider(tmp_path, credentials=str(creds_file))
+    assert p.reachable
+    with p.engine.connect() as conn:
+        assert conn.execute(text("SELECT 1")).scalar() == 1
+    assert p.engine.url.password == make_url(PG_DSN).password
+    assert p.engine.url.password not in str(p.engine.url)
+
+
+@needs_pg
+def test_make_sink_credentials(creds_file):
+    from sqlsink.credentials import CredentialsError
+    from sqlsink.sink import make_sink
+    from sqlsink.sink_postgres import SqlSink
+
+    sink = make_sink({"type": "postgres", "credentials": str(creds_file)})
+    assert isinstance(sink, SqlSink)
+    with sink.engine.connect() as conn:
+        assert conn.exec_driver_sql("SELECT 1").scalar() == 1
+    with pytest.raises(CredentialsError):
+        make_sink({"type": "postgres", "credentials": str(creds_file), "dsn": PG_DSN})

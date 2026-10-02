@@ -59,6 +59,7 @@ from snakemake_interface_storage_plugins.storage_provider import (
 from snakemake_interface_storage_plugins.settings import StorageProviderSettingsBase
 
 from sqlsink import grants as grants_mod
+from sqlsink.credentials import load_credentials
 from sqlsink.engine import make_engine
 from sqlsink.fingerprint import compute_dataset_update_id_for_files, published_marker
 from sqlsink.stage import fetch_marker, fetch_staged_marker, is_current, stage_table
@@ -76,9 +77,13 @@ def split_query(query: str) -> tuple[str, str]:
 
 @dataclass
 class StorageProviderSettings(StorageProviderSettingsBase):
+    credentials: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path of a SOPS-encrypted (or chmod 600 plaintext) PostgreSQL credentials record (host, port, dbname, user, password, sslmode, ...). Preferred over dsn for PostgreSQL: the password never enters Snakemake's metadata."},
+    )
     dsn: Optional[str] = field(
         default=None,
-        metadata={"help": "SQLAlchemy DSN of the database holding the marker table and the tables themselves. Stored in Snakemake's metadata: prefer dsn_file or dsn_env."},
+        metadata={"help": "SQLAlchemy DSN of the database holding the marker table and the tables themselves. Fine for DuckDB or a DSN without a secret; discouraged for PostgreSQL with a password, which would be stored in Snakemake's metadata (use credentials)."},
     )
     dsn_file: Optional[str] = field(
         default=None,
@@ -106,8 +111,10 @@ class StorageProviderSettings(StorageProviderSettingsBase):
     )
 
 
-def resolve_dsn(settings: StorageProviderSettings) -> str:
-    """The DSN from `dsn`, else `dsn_file`, else `dsn_env`."""
+def resolve_url(settings: StorageProviderSettings):
+    """The database URL from `credentials`, else `dsn`, else `dsn_file`, else `dsn_env`."""
+    if settings.credentials:
+        return load_credentials(settings.credentials).url()
     if settings.dsn:
         return settings.dsn
     if settings.dsn_file:
@@ -117,7 +124,7 @@ def resolve_dsn(settings: StorageProviderSettings) -> str:
         if not value:
             raise ValueError(f"environment variable {settings.dsn_env!r} (dsn_env) is not set")
         return value
-    raise ValueError("no database configured: set one of dsn, dsn_file, dsn_env")
+    raise ValueError("no database configured: set one of credentials, dsn, dsn_file, dsn_env")
 
 
 class StorageProvider(StorageProviderBase):
@@ -131,7 +138,9 @@ class StorageProvider(StorageProviderBase):
         # tables. A database without them simply has no markers, so every object
         # is "missing"; staging and publishing create them when they run
         # (`sqlsink.metadata.create_all`). Construction only probes the connection.
-        self.engine = make_engine(resolve_dsn(self.settings))
+        # Resolved outside the try below: a missing/undecryptable credentials
+        # record is a configuration error, not an unreachable server.
+        self.engine = make_engine(resolve_url(self.settings))
         try:
             with self.engine.connect() as conn:
                 conn.execute(text("SELECT 1"))

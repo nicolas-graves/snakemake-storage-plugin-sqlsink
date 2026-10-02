@@ -14,11 +14,12 @@ import re
 from collections.abc import Iterator
 
 from sqlalchemy import Engine, Table, create_engine, func, insert, select, text, update
+from sqlalchemy.engine import URL
 
 from .sqlident import qualified, quote_ident
 
 
-def make_engine(dsn: str, **kwargs) -> Engine:
+def make_engine(dsn: str | URL, **kwargs) -> Engine:
     return create_engine(dsn, **kwargs)
 
 
