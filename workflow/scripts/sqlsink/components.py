@@ -25,6 +25,7 @@ from .join import Relation, join_spec, render_join_sql
 from .manifest import DatasetMaterialization
 from .queries import contour_columns, fetch_row, read_parquet_sql
 from .sink import OrphanFactsError, check_no_orphans, duckdb_session, normalize  # noqa: F401
+from .sqlident import quote_ident
 
 
 @dataclass
@@ -71,7 +72,7 @@ def _copy_atomic(
 def _order_by_all(query: str, columns: list[str]) -> str:
     # A total order over DISTINCT rows makes the file bytes (hence its
     # sha256, hence the dataset update_id) reproducible across runs.
-    order = ", ".join(f'"{c}"' for c in columns)
+    order = ", ".join(quote_ident(c) for c in columns)
     return f"SELECT * FROM ({query}) ORDER BY {order}"
 
 

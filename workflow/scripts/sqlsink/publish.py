@@ -27,6 +27,7 @@ from .engine import (
     upsert_by_pk,
 )
 from .manifest import DatasetMaterialization, DatasetV2
+from .sqlident import qualified, quote_ident as q
 
 log = logging.getLogger(__name__)
 
@@ -147,10 +148,10 @@ def publish_tables(
                     keep_old_mod.park(conn, table_name, None)
                 elif inspector.has_table(table_name):
                     old_name = f"{table_name}__old__{ts}"
-                    conn.execute(text(f'ALTER TABLE "{table_name}" RENAME TO "{old_name}"'))
+                    conn.execute(text(f"ALTER TABLE {q(table_name)} RENAME TO {q(old_name)}"))
                     old_names.append(old_name)
 
-                conn.execute(text(f'ALTER TABLE "{staging_name}" RENAME TO "{table_name}"'))
+                conn.execute(text(f"ALTER TABLE {q(staging_name)} RENAME TO {q(table_name)}"))
                 _upsert_marker(conn, receipt)
                 published.append(table_name)
 
@@ -208,7 +209,7 @@ def _drop_old_tables(engine, old_names: list[str], lock_timeout: str | None = No
         try:
             with engine.begin() as conn:
                 apply_lock_timeout(conn, lock_timeout)
-                conn.execute(text(f'DROP TABLE IF EXISTS "{name}"'))
+                conn.execute(text(f"DROP TABLE IF EXISTS {q(name)}"))
         except Exception:
             # Non-fatal: leftover table, cleaned up on a later run/sweep.
             log.warning("could not drop leftover table %s", name, exc_info=True)
@@ -251,7 +252,7 @@ def _analyze_relations(engine, relations: list[tuple[str, str | None]], lock_tim
         if key in seen:
             continue
         seen.add(key)
-        ref = f'"{schema}"."{name}"' if schema else f'"{name}"'
+        ref = qualified(name, schema)
         try:
             with engine.begin() as conn:
                 apply_lock_timeout(conn, lock_timeout)
@@ -549,19 +550,19 @@ def _replace_public_relation(
     if keep:
         keep_old_mod.park(conn, name, None)
     elif name in matviews:
-        conn.execute(text(f'DROP MATERIALIZED VIEW "{name}"'))
+        conn.execute(text(f"DROP MATERIALIZED VIEW {q(name)}"))
     elif name in views:
-        conn.execute(text(f'DROP VIEW "{name}"'))
+        conn.execute(text(f"DROP VIEW {q(name)}"))
     elif name in tables:
         old_name = f"{name}__old__{ts}"
-        conn.execute(text(f'ALTER TABLE "{name}" RENAME TO "{old_name}"'))
+        conn.execute(text(f"ALTER TABLE {q(name)} RENAME TO {q(old_name)}"))
         old_physical.append((old_name, None))
     if materialize == "view":
-        conn.execute(text(f'CREATE VIEW "{name}" AS {select_sql}'))
+        conn.execute(text(f"CREATE VIEW {q(name)} AS {select_sql}"))
     elif dialect == "postgresql":
-        conn.execute(text(f'CREATE MATERIALIZED VIEW "{name}" AS {select_sql}'))
+        conn.execute(text(f"CREATE MATERIALIZED VIEW {q(name)} AS {select_sql}"))
     else:
-        conn.execute(text(f'CREATE TABLE "{name}" AS {select_sql}'))
+        conn.execute(text(f"CREATE TABLE {q(name)} AS {select_sql}"))
     if materialize != "view" and fresh is not None:
         fresh.append((name, None))
 
@@ -629,18 +630,18 @@ def _rename_swap_physical(
     `ANALYZE` (outside this transaction, once it has committed)."""
     live_name, live_schema = meta_mod.physical_name_and_schema(dialect, bare_name, schema)
     staging_name, staging_schema = meta_mod.physical_name_and_schema(dialect, staging_bare_name, schema)
-    live_ref = f'"{live_schema}"."{live_name}"' if live_schema else f'"{live_name}"'
-    staging_ref = f'"{staging_schema}"."{staging_name}"' if staging_schema else f'"{staging_name}"'
+    live_ref = qualified(live_name, live_schema)
+    staging_ref = qualified(staging_name, staging_schema)
 
     inspector = inspect(conn)
     if keep:
         keep_old_mod.park(conn, live_name, live_schema)
     elif inspector.has_table(live_name, schema=live_schema):
         old_name = f"{live_name}__old__{ts}"
-        conn.execute(text(f'ALTER TABLE {live_ref} RENAME TO "{old_name}"'))
+        conn.execute(text(f"ALTER TABLE {live_ref} RENAME TO {q(old_name)}"))
         old_physical.append((old_name, live_schema))
 
-    conn.execute(text(f'ALTER TABLE {staging_ref} RENAME TO "{live_name}"'))
+    conn.execute(text(f"ALTER TABLE {staging_ref} RENAME TO {q(live_name)}"))
     if fresh is not None:
         fresh.append((live_name, live_schema))
 
@@ -663,12 +664,12 @@ def _replace_compatibility_view(
         keep_old_mod.park(conn, dataset_name, None)
     elif is_table and not is_view:
         old_name = f"{dataset_name}__old__{ts}"
-        conn.execute(text(f'ALTER TABLE "{dataset_name}" RENAME TO "{old_name}"'))
+        conn.execute(text(f"ALTER TABLE {q(dataset_name)} RENAME TO {q(old_name)}"))
         old_physical.append((old_name, None))
     else:
-        conn.execute(text(f'DROP VIEW IF EXISTS "{dataset_name}"'))
+        conn.execute(text(f"DROP VIEW IF EXISTS {q(dataset_name)}"))
 
-    conn.execute(text(f'CREATE VIEW "{dataset_name}" AS {view_sql}'))
+    conn.execute(text(f"CREATE VIEW {q(dataset_name)} AS {view_sql}"))
 
 
 def _assert_dataset_marker_unchanged_since_staging(conn, dataset_name: str, receipt: dict) -> None:
@@ -715,7 +716,7 @@ def _drop_old_tables_qualified(
 ) -> None:
     # Reverse of swap order: dependents (facts, parts) before what they reference.
     for name, schema in reversed(old_physical):
-        ref = f'"{schema}"."{name}"' if schema else f'"{name}"'
+        ref = qualified(name, schema)
         try:
             with engine.begin() as conn:
                 apply_lock_timeout(conn, lock_timeout)

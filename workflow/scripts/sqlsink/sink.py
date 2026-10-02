@@ -29,6 +29,7 @@ from sqlalchemy import Engine
 from .fingerprint import compute_dataset_update_id, sha256_source
 from .manifest import DatasetMaterialization, DatasetV2
 from .queries import ArrowSource, SinkTableSource, bind_sources, compact_select_sql, contour_select_sql, fetch_row
+from .sqlident import quote_ident
 
 
 class OrphanFactsError(ValueError):
@@ -202,7 +203,7 @@ def orphan_count(con: duckdb.DuckDBPyConnection, dataset: NormalizedDataset) -> 
     """Distinct compact fact rows whose join key has no contour."""
     manifest = dataset.manifest
     on = " AND ".join(
-        f'f."{fc}" = c."{cc}"'
+        f"f.{quote_ident(fc)} = c.{quote_ident(cc)}"
         for fc, cc in zip(manifest.fact_join_columns, manifest.contour_join_columns)
     )
     sql = (
@@ -413,7 +414,7 @@ def make_sink(spec: dict, *, create_markers: bool = True) -> Sink:
 def _default_schema(engine, schema: str) -> None:
     from sqlalchemy import event
 
-    quoted = '"' + schema.replace('"', '""') + '"'
+    quoted = quote_ident(schema)
 
     @event.listens_for(engine, "connect")
     def _use_schema(dbapi_connection, _record):

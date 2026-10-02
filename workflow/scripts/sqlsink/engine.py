@@ -15,6 +15,8 @@ from collections.abc import Iterator
 
 from sqlalchemy import Engine, Table, create_engine, func, insert, select, text, update
 
+from .sqlident import qualified, quote_ident
+
 
 def make_engine(dsn: str, **kwargs) -> Engine:
     return create_engine(dsn, **kwargs)
@@ -148,7 +150,7 @@ def ensure_schema(conn, schema: str | None) -> None:
     No-op when `schema` is None."""
     if schema is None:
         return
-    conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+    conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {quote_ident(schema)}"))
 
 
 def upsert_by_pk(conn, table: Table, pk_col: str, values: dict, now_col: str | None = None) -> None:
@@ -221,9 +223,9 @@ def _bulk_load_postgres_copy(conn, table: Table, rows: list[dict]) -> None:
 
     raw_conn = conn.connection
     cursor = raw_conn.driver_connection.cursor() if hasattr(raw_conn, "driver_connection") else raw_conn.cursor()
-    qualified = f'"{table.schema}"."{table.name}"' if table.schema else f'"{table.name}"'
-    col_list = ", ".join(f'"{c}"' for c in columns)
-    with cursor.copy(f"COPY {qualified} ({col_list}) FROM STDIN WITH (FORMAT csv)") as copy:
+    ref = qualified(table.name, table.schema)
+    col_list = ", ".join(quote_ident(c) for c in columns)
+    with cursor.copy(f"COPY {ref} ({col_list}) FROM STDIN WITH (FORMAT csv)") as copy:
         copy.write(payload)
 
 
@@ -246,9 +248,9 @@ def bulk_load_streaming(conn, table: Table, duckdb_cursor, columns: list[str], b
     if dialect == "postgresql":
         raw_conn = conn.connection
         cursor = raw_conn.driver_connection.cursor() if hasattr(raw_conn, "driver_connection") else raw_conn.cursor()
-        qualified = f'"{table.schema}"."{table.name}"' if table.schema else f'"{table.name}"'
-        col_list = ", ".join(f'"{c}"' for c in columns)
-        with cursor.copy(f"COPY {qualified} ({col_list}) FROM STDIN WITH (FORMAT csv)") as copy:
+        ref = qualified(table.name, table.schema)
+        col_list = ", ".join(quote_ident(c) for c in columns)
+        with cursor.copy(f"COPY {ref} ({col_list}) FROM STDIN WITH (FORMAT csv)") as copy:
             while True:
                 batch = duckdb_cursor.fetchmany(batch_size)
                 if not batch:
@@ -263,8 +265,8 @@ def bulk_load_streaming(conn, table: Table, duckdb_cursor, columns: list[str], b
         import pyarrow as pa
 
         raw = conn.connection.driver_connection
-        qualified = f'"{table.schema}"."{table.name}"' if table.schema else f'"{table.name}"'
-        col_list = ", ".join(f'"{c}"' for c in columns)
+        ref = qualified(table.name, table.schema)
+        col_list = ", ".join(quote_ident(c) for c in columns)
         reader = (
             duckdb_cursor.to_arrow_reader(batch_size)
             if hasattr(duckdb_cursor, "to_arrow_reader")
@@ -273,7 +275,7 @@ def bulk_load_streaming(conn, table: Table, duckdb_cursor, columns: list[str], b
         for batch in reader:
             raw.register("__sqlsink_batch", pa.Table.from_batches([batch]))
             try:
-                raw.execute(f"INSERT INTO {qualified} ({col_list}) SELECT * FROM __sqlsink_batch")
+                raw.execute(f"INSERT INTO {ref} ({col_list}) SELECT * FROM __sqlsink_batch")
             finally:
                 raw.unregister("__sqlsink_batch")
             total += batch.num_rows

@@ -12,15 +12,12 @@ from sqlalchemy import text
 from . import metadata as meta_mod
 from .fingerprint import published_marker
 from .manifest import DatasetMaterialization, DatasetV2
+from .sqlident import quote_ident as _quote
 
 
 def _split(relation: str, default_schema: str = "public") -> tuple[str, str]:
     schema, _, name = relation.rpartition(".")
     return (schema or default_schema), name
-
-
-def _quote(identifier: str) -> str:
-    return '"' + identifier.replace('"', '""') + '"'
 
 
 def _require_postgres(engine) -> None:

@@ -63,7 +63,7 @@ from sqlsink.engine import make_engine
 from sqlsink.fingerprint import compute_dataset_update_id_for_files, published_marker
 from sqlsink.stage import fetch_marker, fetch_staged_marker, is_current, stage_table
 
-TABLE_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+TABLE_NAME_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")  # use fullmatch: `$` also matches before a final "\n"
 KINDS = ("published", "dataset", "grants")
 ON_UNREACHABLE = ("error", "treat-missing")
 
@@ -202,7 +202,7 @@ class StorageProvider(StorageProviderBase):
             # are resolved before the storage object is actually used, so
             # accept it here rather than validating the literal string.
             return StorageQueryValidationResult(query=query, valid=True)
-        if not TABLE_NAME_RE.match(split_query(query)[1]):
+        if not TABLE_NAME_RE.fullmatch(split_query(query)[1]):
             return StorageQueryValidationResult(
                 query=query,
                 valid=False,

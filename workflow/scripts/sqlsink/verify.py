@@ -20,6 +20,7 @@ import duckdb
 
 from .manifest import DatasetMaterialization
 from .queries import fetch_row
+from .sqlident import quote_ident as _quote, quote_literal as _literal
 
 
 @dataclass
@@ -45,14 +46,6 @@ class EquivalenceResult:
             and self.null_key_original == self.null_key_view
             and not self.schema_mismatches
         )
-
-
-def _quote(identifier: str) -> str:
-    return '"' + identifier.replace('"', '""') + '"'
-
-
-def _literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
 
 
 def _peak_rss_mb() -> int:

@@ -17,6 +17,7 @@ from . import metadata as meta_mod
 from .engine import bulk_load, upsert_by_pk
 from .fingerprint import LOADER_VERSION, TYPE_MAP_VERSION, compute_update_id_for_file
 from .queries import fetch_row, read_parquet_sql
+from .sqlident import quote_ident
 
 
 @dataclass
@@ -43,8 +44,9 @@ def _read_parquet_schema_and_stats(parquet_path: str) -> tuple[list[tuple[str, s
         rel = con.sql(f"SELECT * FROM {read_parquet_sql(parquet_path)}")
         columns = [(name, str(typ)) for name, typ in zip(rel.columns, rel.types)]
         row_count = fetch_row(con, f"SELECT count(*) FROM {read_parquet_sql(parquet_path)}")[0]
+        # Column names come from the file: quote them, never splice them in.
         null_exprs = ", ".join(
-            f'count(*) FILTER (WHERE "{name}" IS NULL) AS "{name}"' for name, _ in columns
+            f"count(*) FILTER (WHERE {quote_ident(name)} IS NULL) AS {quote_ident(name)}" for name, _ in columns
         )
         null_row = fetch_row(con, f"SELECT {null_exprs} FROM {read_parquet_sql(parquet_path)}")
         null_counts = dict(zip((name for name, _ in columns), null_row)) if columns else {}

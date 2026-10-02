@@ -49,6 +49,7 @@ from sqlalchemy import delete, inspect, text
 
 from . import metadata as meta_mod
 from .engine import advisory_lock, apply_lock_timeout
+from .sqlident import quote_ident as _quote, quote_literal as _literal
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,9 @@ TAG = "sqlsink:keep_old "
 PG_MAX_IDENTIFIER = 63
 
 _KEYWORD = {"table": "TABLE", "view": "VIEW", "matview": "MATERIALIZED VIEW"}
+# Privileges a relation's ACL can hold (`aclexplode`), i.e. every value
+# `_grants` can record. Anything else read back from a comment is refused.
+_PRIVILEGES = frozenset({"SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN"})
 
 
 class KeptOldExists(RuntimeError):
@@ -82,16 +86,8 @@ def old_name(name: str) -> str:
     return f"{OLD_PREFIX}{name}"
 
 
-def _quote(identifier: str) -> str:
-    return '"' + identifier.replace('"', '""') + '"'
-
-
 def _ref(name: str, schema: str | None) -> str:
     return f"{_quote(schema)}.{_quote(name)}" if schema else _quote(name)
-
-
-def _literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
 
 
 def kind_of(conn, name: str, schema: str | None) -> str | None:
@@ -179,9 +175,16 @@ def park(conn, name: str, schema: str | None, kind: str | None = None) -> bool:
 
 
 def _restore_grants(conn, ref: str, comment: str | None) -> None:
+    """Replay the grants recorded in a kept relation's comment. The comment is
+    read back from the catalog, so it is data: every privilege is checked
+    against `_PRIVILEGES` (before any is granted) rather than spliced in."""
     if not comment or not comment.startswith(TAG):
         return
-    for grantee, privilege in json.loads(comment[len(TAG):]).get("grants", []):
+    grants = [(grantee, str(privilege).upper()) for grantee, privilege in json.loads(comment[len(TAG):]).get("grants", [])]
+    unknown = sorted({p for _, p in grants} - _PRIVILEGES)
+    if unknown:
+        raise ValueError(f"refusing to restore grants on {ref}: unknown privilege(s) {unknown} in its keep_old comment")
+    for grantee, privilege in grants:
         target = "PUBLIC" if grantee == "PUBLIC" else _quote(grantee)
         conn.execute(text(f"GRANT {privilege} ON TABLE {ref} TO {target}"))
 

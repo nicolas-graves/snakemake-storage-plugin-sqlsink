@@ -11,6 +11,8 @@ import hashlib
 import json
 from typing import Any
 
+from .sqlident import qualified
+
 LOADER_VERSION = 1
 TYPE_MAP_VERSION = 2  # 2: DOUBLE -> sa.Double (was FLOAT: float32 on DuckDB), unmapped types raise
 
@@ -272,7 +274,7 @@ def fingerprint(engine, relations, *, count_rows=True) -> dict:
         if exists:
             cols = [[c["name"], str(c["type"])] for c in inspector.get_columns(name, schema=schema)]
             entry["columns_sha256"] = hashlib.sha256(json.dumps(cols).encode()).hexdigest()
-            ref = f'"{schema}"."{name}"' if schema else f'"{name}"'
+            ref = qualified(name, schema)
             if count_rows is True or (count_rows and relation in count_rows):
                 with engine.connect() as conn:
                     entry["row_count"] = conn.execute(text(f"SELECT count(*) FROM {ref}")).scalar_one()

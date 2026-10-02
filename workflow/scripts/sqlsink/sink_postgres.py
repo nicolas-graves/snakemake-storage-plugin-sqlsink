@@ -24,6 +24,7 @@ from .publish import publish_datasets
 from .queries import parts_select_sql, view_select_sql, zone_select_sql
 from .sink import ContourSource, NormalizedDataset, default_spill_dir
 from .sink_v2 import V2SinkMixin
+from .sqlident import qualified, quote_ident
 from .stage import _DUCKDB_TO_SA, fetch_marker
 
 
@@ -85,7 +86,7 @@ def _table_object_for(name: str, columns: list[tuple[str, str]], schema: str | N
 
 
 def _ref(name: str, schema: str | None) -> str:
-    return f'"{schema}"."{name}"' if schema else f'"{name}"'
+    return qualified(name, schema)
 
 
 def _constrained_table(
@@ -146,28 +147,51 @@ def fetch_staged_contour_marker(engine, contour_table: str) -> dict | None:
     return meta_mod.fetch_one(engine, meta_mod.staged_contour_updates, "contour_table", contour_table)
 
 
+def _libpq_value(value) -> str:
+    # libpq keyword/value syntax: single-quoted, with \' and \\ escapes.
+    return "'" + str(value).replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def pg_conninfo(url) -> str:
+    """libpq keyword/value connection string for a SQLAlchemy PostgreSQL URL.
+
+    Every query parameter of the DSN (`sslmode`, `sslrootcert`, `options`,
+    `host=` for a socket directory, ...) is passed through, as the URL's own
+    driver gets it: dropping them would make the scanner connect with libpq's
+    defaults, i.e. without the TLS verification the DSN asks for. A repeated
+    key (multi-host DSN) is joined with commas, as libpq expects."""
+    pairs = [
+        ("dbname", url.database),
+        ("user", url.username),
+        ("password", url.password),
+        ("host", url.host),
+        ("port", url.port),
+    ]
+    for key, value in url.query.items():
+        pairs.append((key, ",".join(value) if isinstance(value, tuple) else value))
+    return " ".join(f"{key}={_libpq_value(value)}" for key, value in pairs if value is not None)
+
+
 def pg_attach(con: duckdb.DuckDBPyConnection, url, alias: str = "pg") -> None:
-    """Attach a PostgreSQL database read-only to a DuckDB connection."""
+    """Attach a PostgreSQL database read-only to a DuckDB connection. A failed
+    attach is re-raised with the password masked: DuckDB's own message quotes
+    the whole connection string."""
     if not url.get_backend_name().startswith("postgres"):
         raise ValueError("a PostgreSQL URL is needed")
-    def libpq_value(value) -> str:
-        # libpq keyword/value syntax: single-quoted, with \' and \\ escapes.
-        return "'" + str(value).replace("\\", "\\\\").replace("'", "\\'") + "'"
-
-    conninfo = " ".join(
-        f"{key}={libpq_value(value)}"
-        for key, value in (
-            ("dbname", url.database),
-            ("user", url.username),
-            ("password", url.password),
-            ("host", url.host),
-            ("port", url.port),
-        )
-        if value is not None
-    )
+    conninfo = pg_conninfo(url)
     con.execute("INSTALL postgres; LOAD postgres;")
     escaped = conninfo.replace("'", "''")
-    con.execute(f"ATTACH '{escaped}' AS {alias} (TYPE postgres, READ_ONLY)")
+    try:
+        con.execute(f"ATTACH '{escaped}' AS {quote_ident(alias)} (TYPE postgres, READ_ONLY)")
+        return
+    except duckdb.Error as err:
+        error_type, message = type(err), str(err)
+    if url.password:
+        for secret in {str(url.password), _libpq_value(url.password)[1:-1]}:
+            message = message.replace(secret, "***")
+    # Raised outside the `except` block: the original exception must not ride
+    # along as `__context__` (which `from None` only hides from the printout).
+    raise error_type(message)
 
 
 class SqlSink(V2SinkMixin):
@@ -478,22 +502,22 @@ class SqlSink(V2SinkMixin):
         connection, keeping DuckDB's column types."""
         if self.engine.dialect.name == "postgresql":
             pg_attach(con, self.engine.url)
-            return f'pg."{self.view_schema}"."{manifest.name}"'
+            return f"pg.{qualified(manifest.name, self.view_schema)}"
 
-        view = f'"{manifest.name}"'
+        view = quote_ident(manifest.name)
         with self.engine.connect() as conn:
             cur = conn.connection.driver_connection.cursor()
             cur.execute(f"DESCRIBE SELECT * FROM {view}")
             described = cur.fetchall()
             cur.execute(f"SELECT * FROM {view}")
             rows = cur.fetchall()
-        table = f"sink_joined_{manifest.name}"
-        column_defs = ", ".join(f'"{name}" {duck_type}' for name, duck_type, *_ in described)
-        con.execute(f'CREATE OR REPLACE TABLE "{table}" ({column_defs})')
+        table = quote_ident(f"sink_joined_{manifest.name}")
+        column_defs = ", ".join(f"{quote_ident(name)} {duck_type}" for name, duck_type, *_ in described)
+        con.execute(f"CREATE OR REPLACE TABLE {table} ({column_defs})")
         marks = ", ".join("?" for _ in described)
         if rows:
-            con.executemany(f'INSERT INTO "{table}" VALUES ({marks})', rows)
-        return f'"{table}"'
+            con.executemany(f"INSERT INTO {table} VALUES ({marks})", rows)
+        return table
 
 
 PostgresSink = SqlSink  # backwards-compatible name

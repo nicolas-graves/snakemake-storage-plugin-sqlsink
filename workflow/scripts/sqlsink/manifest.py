@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from .relations import Edge, Entity, FanOutError, JoinGraph, RelationError
+from .sqlident import is_plain_ident
 
 MANIFEST_VERSION = 1
 MANIFEST_VERSION_V2 = 2
@@ -44,6 +45,12 @@ class DatasetMaterialization:
     keyed: bool = False
 
     def __post_init__(self):
+        _require_idents(
+            f"dataset {self.name!r}",
+            name=self.name,
+            contour_table=self.contour_table,
+            compact_schema=self.compact_schema,
+        )
         if len(self.fact_join_columns) != len(self.contour_join_columns):
             raise ValueError(
                 f"dataset {self.name!r}: fact_join_columns and contour_join_columns "
@@ -145,11 +152,17 @@ COMPONENT_KINDS = ("fact", "dimension", "bridge")
 MATERIALIZE_MODES = ("view", "materialized")
 JOIN_TYPES = ("inner", "left")
 DEFAULT_STORAGE_SCHEMA = "analytics_storage"
-_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
 class ManifestError(ValueError):
     """A v2 manifest is inconsistent."""
+
+
+def _require_idents(owner: str, **names: str | None) -> None:
+    """Relation and schema names become SQL identifiers and Snakemake storage
+    queries, so they must be plain identifiers (`[A-Za-z_][A-Za-z0-9_]*`).
+    Column names are free-form (they are always quoted) and are not checked."""
+    for key, value in names.items():
+        if value is not None and not is_plain_ident(value):
+            raise ManifestError(f"{owner}: {key} {value!r} must match [A-Za-z_][A-Za-z0-9_]*")
 
 
 @dataclass(frozen=True)
@@ -172,8 +185,9 @@ class Component:
     shared: bool = field(default=False, compare=False)
 
     def __post_init__(self):
-        if not _IDENT.match(self.name):
+        if not is_plain_ident(self.name):
             raise ManifestError(f"component name {self.name!r} must match [A-Za-z_][A-Za-z0-9_]*")
+        _require_idents(f"component {self.name!r}", schema=self.schema, source_table=self.source_table)
         if self.kind not in COMPONENT_KINDS:
             raise ManifestError(f"component {self.name!r}: kind must be one of {COMPONENT_KINDS}, not {self.kind!r}")
         if self.kind == "dimension" and not self.primary_key:
@@ -252,6 +266,7 @@ class DatasetV2:
     storage_schema: str = DEFAULT_STORAGE_SCHEMA
 
     def __post_init__(self):
+        _require_idents(f"dataset {self.name!r}", name=self.name, storage_schema=self.storage_schema)
         names = [c.name for c in self.components]
         if len(set(names)) != len(names):
             raise ManifestError(f"dataset {self.name!r}: duplicate component names")

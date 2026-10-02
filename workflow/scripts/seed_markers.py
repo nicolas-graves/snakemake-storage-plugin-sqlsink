@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from sqlsink.engine import make_engine  # noqa: E402
 from sqlsink.fingerprint import compute_update_id_for_file  # noqa: E402
 from sqlsink.metadata import analytics_table_updates, create_all  # noqa: E402
+from sqlsink.sqlident import quote_ident  # noqa: E402
 from sqlalchemy import inspect, select, text  # noqa: E402
 
 
@@ -45,7 +46,7 @@ def seed_table(engine, table_name: str, parquet_path: str, verify_only: bool = F
             raise RuntimeError(
                 f"refusing to seed {table_name!r}: public table does not exist"
             )
-        row_count = conn.execute(text(f'SELECT count(*) FROM "{table_name}"')).scalar_one()
+        row_count = conn.execute(text(f"SELECT count(*) FROM {quote_ident(table_name)}")).scalar_one()
 
         print(f"{table_name}: public row_count={row_count}, update_id={update_id}")
         if verify_only:

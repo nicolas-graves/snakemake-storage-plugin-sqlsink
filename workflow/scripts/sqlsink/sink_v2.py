@@ -23,6 +23,7 @@ from .engine import advisory_lock, bulk_load_streaming, ensure_schema, upsert_by
 from .fingerprint import LOADER_VERSION, TYPE_MAP_VERSION, components_digest
 from .manifest import Component, DatasetV2, ManifestError
 from .queries import fetch_row, source_sql
+from .sqlident import qualified, quote_ident as _q
 from .view import physical_refs, render_view_sql
 
 
@@ -74,10 +75,6 @@ class ViewDatasetReceipt:
 
 def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
-
-
-def _q(identifier: str) -> str:
-    return '"' + identifier.replace('"', '""') + '"'
 
 
 def component_select_sql(component: Component, source) -> str:
@@ -336,11 +333,11 @@ class V2SinkMixin:
                     con.execute(f"SET memory_limit = {_sql_string(memory_limit)}")
                 pg_attach(con, self.engine.url)
                 schema = self.view_schema or "public"
-                yield con, lambda name: f'pg."{schema}"."{name}"'
+                yield con, lambda name: f"pg.{qualified(name, schema)}"
             return
         with self.engine.connect() as conn:
             cursor = conn.connection.driver_connection.cursor()
             try:
-                yield _CursorAdapter(cursor), lambda name: f'"{name}"'
+                yield _CursorAdapter(cursor), lambda name: _q(name)
             finally:
                 cursor.close()
