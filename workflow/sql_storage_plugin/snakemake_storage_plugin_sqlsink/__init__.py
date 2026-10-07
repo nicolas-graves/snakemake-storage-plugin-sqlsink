@@ -266,17 +266,20 @@ class StorageObject(StorageObjectRead, StorageObjectWrite):
 
         manifest = self._manifest()
         if isinstance(manifest, DatasetV2):
+            sources = sources_from_dir(manifest, self.provider.settings.parquet_dir)
+            if any(not Path(path).is_file() for path in sources.values()):
+                return False
             sink = SqlSink(self._engine)
             try:
-                update_id = normalize_v2(
-                    manifest, sources_from_dir(manifest, self.provider.settings.parquet_dir), sink=sink
-                ).update_id
+                update_id = normalize_v2(manifest, sources, sink=sink).update_id
             except LookupError:  # a sink-table source that is not published yet
                 return False
         else:
-            update_id, _, _ = compute_dataset_update_id_for_files(
-                manifest, self._parquet_path(manifest.fact_parquet_key()), self._parquet_path(manifest.contour_source)
-            )
+            fact_path = self._parquet_path(manifest.fact_parquet_key())
+            contour_path = self._parquet_path(manifest.contour_source)
+            if not Path(fact_path).is_file() or not Path(contour_path).is_file():
+                return False
+            update_id, _, _ = compute_dataset_update_id_for_files(manifest, fact_path, contour_path)
         marker = self._dataset_marker()
         return (
             marker is not None

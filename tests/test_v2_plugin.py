@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 
 import pytest
 import yaml
@@ -79,6 +80,8 @@ def test_dataset_object_tracks_source_files_components_and_receipt(provider, eng
         "anchor VARCHAR, f21 VARCHAR, priority INTEGER",
         [("A", "F2", 9)],
     )
+    assert obj.exists() is False
+    Path(provider.settings.parquet_dir, "fact.parquet").unlink()
     assert obj.exists() is False
 
 

@@ -281,6 +281,8 @@ def test_dataset_object(provider, engine, tmp_path):
     obj.retrieve_object()
     receipt = json.loads(obj.local_path().read_text())
     assert receipt["dataset"] == "zones" and receipt["contour"]["kind"] == "contour"
+    paths["facts"].unlink()
+    assert obj.exists() is False
 
 
 def test_refresh_publish_stamps_every_table_identically_and_keeps_receipts_stable(provider, engine, parquet_dir):
