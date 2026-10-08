@@ -155,6 +155,24 @@ class StorageProvider(StorageProviderBase):
         self._grants = None
         self._inventory_cache = None
         self._inventory_state = None
+        self._direct_state = None
+
+    def direct_state(self):
+        """Share one catalog read across direct DAG checks until a write occurs."""
+        if self._direct_state is None:
+            roles = []
+            if self.settings.grants_file:
+                if self._grants is None:
+                    import yaml
+                    self._grants = yaml.safe_load(Path(self.settings.grants_file).read_text()) or {}
+                roles = list(self._grants)
+            self._direct_state = read_planning_state(self.engine, roles=roles)
+        return self._direct_state
+
+    def invalidate_planning_state(self):
+        self._direct_state = None
+        self._inventory_cache = None
+        self._inventory_state = None
 
     def inventory_state(self, cache):
         if self.engine.dialect.name != "postgresql":
@@ -321,9 +339,7 @@ class StorageObject(StorageObjectRead, StorageObjectWrite):
         if not self.provider.reachable:
             return False
         if self._engine.dialect.name == "postgresql":
-            if self.kind == "grants":
-                return self._grants_current()
-            return self._exists_with_state(read_planning_state(self._engine))
+            return self._exists_with_state(self.provider.direct_state())
         return self._exists_with_state(None)
 
     def _exists_with_state(self, state) -> bool:
@@ -384,7 +400,7 @@ class StorageObject(StorageObjectRead, StorageObjectWrite):
         if not self.provider.reachable:
             return 0.0
         if self._engine.dialect.name == "postgresql":
-            return self._mtime_with_state(read_planning_state(self._engine))
+            return self._mtime_with_state(self.provider.direct_state())
         return self._mtime_with_state(None)
 
     def _mtime_with_state(self, state) -> float:
@@ -470,17 +486,21 @@ class StorageObject(StorageObjectRead, StorageObjectWrite):
 
     def retrieve_object(self):
         """Materialize the receipt for this object locally."""
-        receipt = self._receipt()
-        self.local_path().parent.mkdir(parents=True, exist_ok=True)
-        with open(self.local_path(), "w") as f:
-            json.dump(receipt, f, indent=2, sort_keys=True, default=str)
+        try:
+            receipt = self._receipt()
+            self.local_path().parent.mkdir(parents=True, exist_ok=True)
+            with open(self.local_path(), "w") as f:
+                json.dump(receipt, f, indent=2, sort_keys=True, default=str)
+        finally:
+            # A staged object may be materialized through this path.
+            self.provider.invalidate_planning_state()
 
     def store_object(self):
         # No-op: the rule's script (`stage_table.py`, `publish_tables.py`,
         # ...) already performed the real side effect and wrote the receipt
         # to local_path() itself. There is no separate "storage backend
         # location" to push it to -- the database rows are the storage.
-        pass
+        self.provider.invalidate_planning_state()
 
     def remove(self):
         # A published/staged table is never removed via the storage

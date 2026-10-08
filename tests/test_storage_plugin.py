@@ -6,11 +6,14 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from sqlsink.publish import publish_tables
 from sqlsink.stage import fetch_marker, stage_table
+from sqlsink.planning import PlanningState
 
 pytest.importorskip("snakemake_storage_plugin_sqlsink")
 
@@ -34,6 +37,33 @@ def provider(engine, parquet_dir, tmp_path):
 
 def _obj(provider, table_name):
     return StorageObject(query=table_name, keep_local=True, retrieve=True, provider=provider)
+
+
+def test_postgres_direct_checks_share_snapshot_until_storage_write(provider, monkeypatch):
+    from snakemake_storage_plugin_sqlsink import __dict__ as plugin_globals
+
+    provider.engine = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+    published = PlanningState(
+        {"table": {"t": {"update_id": "v1", "published_at": datetime(2026, 1, 1, tzinfo=timezone.utc)}},
+         "staged": {}, "dataset": {}, "component": {}},
+        {("public", "t"): "r"}, set(),
+    )
+    missing = PlanningState({"table": {}, "staged": {}, "dataset": {}, "component": {}}, {}, set())
+    states = iter((published, missing))
+    calls = []
+
+    def read(engine, *, roles):
+        calls.append(roles)
+        return next(states)
+
+    monkeypatch.setitem(plugin_globals, "read_planning_state", read)
+    obj = _obj(provider, "published/t")
+    assert obj.exists()
+    assert obj.mtime() == published.marker("table", "t")["published_at"].timestamp()
+    assert calls == [[]]
+    obj.store_object()  # publication script completed; later checks must read fresh state
+    assert not obj.exists()
+    assert calls == [[], []]
 
 
 def test_exists_false_before_any_publish(provider):
