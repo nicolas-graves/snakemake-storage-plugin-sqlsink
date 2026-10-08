@@ -21,6 +21,7 @@ from sqlalchemy import (
 )
 
 STAGING_PREFIX = "stg__"
+BOOTSTRAP_LOCK_KEY = "snakemake_sql:create_marker_tables"
 
 metadata = MetaData()
 
@@ -167,8 +168,16 @@ def create_all(engine) -> None:
     This is DDL: only code paths that stage or publish may call it. Planning
     (`snakemake -n`), existence checks, mtimes and inventories must stay
     read-only and go through `table_exists` / `fetch_one`, which treat a
-    missing marker table as "no marker"."""
-    metadata.create_all(engine, checkfirst=True)
+    missing marker table as "no marker".
+
+    Serialized under an advisory lock: on an empty database, concurrent jobs
+    would otherwise all pass `checkfirst` and race on `CREATE TABLE`
+    (PostgreSQL rejects the loser with a `pg_type_typname_nsp_index`
+    unique violation)."""
+    from .engine import advisory_lock
+
+    with engine.begin() as conn, advisory_lock(conn, BOOTSTRAP_LOCK_KEY, transactional=True):
+        metadata.create_all(conn, checkfirst=True)
 
 
 def table_exists(engine, table) -> bool:
