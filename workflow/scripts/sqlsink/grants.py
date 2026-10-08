@@ -63,21 +63,9 @@ def role_has_select(engine, role: str, relations) -> bool:
     from the relation ACLs, so tables, views and materialized views alike
     (`information_schema` omits the last)."""
     _require_postgres(engine)
-    with engine.connect() as conn:
-        for relation in relations:
-            schema, name = _split(relation)
-            granted = conn.execute(
-                text(
-                    "SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
-                    "CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) a JOIN pg_roles r ON r.oid = a.grantee "
-                    "WHERE r.rolname = :role AND n.nspname = :schema AND c.relname = :name "
-                    "AND a.privilege_type = 'SELECT'"
-                ),
-                {"role": role, "schema": schema, "name": name},
-            ).first()
-            if granted is None:
-                return False
-    return True
+    from .planning import read_planning_state
+
+    return read_planning_state(engine, roles=[role]).role_has_select(role, relations)
 
 
 def grants_receipt(engine, role: str, relations) -> dict:

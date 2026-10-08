@@ -63,6 +63,8 @@ from sqlsink.credentials import load_credentials
 from sqlsink.engine import make_engine
 from sqlsink.fingerprint import compute_dataset_update_id_for_files, published_marker
 from sqlsink.stage import fetch_marker, fetch_staged_marker, is_current, stage_table
+from sqlsink.planning import read_planning_state
+from sqlsink.fingerprint import compute_update_id_for_file
 
 TABLE_NAME_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")  # use fullmatch: `$` also matches before a final "\n"
 KINDS = ("published", "dataset", "grants")
@@ -151,6 +153,21 @@ class StorageProvider(StorageProviderBase):
             self.logger.warning("sqlsink: database unreachable, treating every storage object as missing")
         self._manifests = None
         self._grants = None
+        self._inventory_cache = None
+        self._inventory_state = None
+
+    def inventory_state(self, cache):
+        if self.engine.dialect.name != "postgresql":
+            return None
+        if cache is not self._inventory_cache:
+            self._inventory_cache = cache
+            roles = list(self._grants) if self.settings.grants_file and self._grants is not None else []
+            if self.settings.grants_file and self._grants is None:
+                import yaml
+                self._grants = yaml.safe_load(Path(self.settings.grants_file).read_text()) or {}
+                roles = list(self._grants)
+            self._inventory_state = read_planning_state(self.engine, roles=roles)
+        return self._inventory_state
 
     def manifests(self) -> dict:
         if self._manifests is None:
@@ -239,10 +256,11 @@ class StorageObject(StorageObjectRead, StorageObjectWrite):
         key = self.cache_key()
         if key in cache.exists_in_storage:
             return
-        exists = self.exists()
+        state = self.provider.inventory_state(cache) if self.provider.reachable else None
+        exists = self._exists_with_state(state) if state is not None else self.exists()
         cache.exists_in_storage[key] = exists
         if exists:
-            cache.mtime[key] = Mtime(storage=self.mtime())
+            cache.mtime[key] = Mtime(storage=self._mtime_with_state(state) if state is not None else self.mtime())
             cache.size[key] = self.size()
 
     def get_inventory_parent(self) -> Optional[str]:
@@ -302,6 +320,24 @@ class StorageObject(StorageObjectRead, StorageObjectWrite):
     def exists(self) -> bool:
         if not self.provider.reachable:
             return False
+        if self._engine.dialect.name == "postgresql":
+            if self.kind == "grants":
+                return self._grants_current()
+            return self._exists_with_state(read_planning_state(self._engine))
+        return self._exists_with_state(None)
+
+    def _exists_with_state(self, state) -> bool:
+        if state is not None:
+            if self.kind == "published":
+                return state.published_table_current(self.table_name)
+            if self.kind == "grants":
+                return state.role_has_select(self.table_name, self.provider.grant_relations(self.table_name))
+            if self.kind == "dataset":
+                return self._dataset_current_with_state(state)
+            parquet = self._parquet_path()
+            return Path(parquet).exists() and state.table_current(
+                self.table_name, compute_update_id_for_file(self.table_name, parquet)[0]
+            )
         if self.kind == "published":
             return self._published_current()
         if self.kind == "dataset":
@@ -319,10 +355,51 @@ class StorageObject(StorageObjectRead, StorageObjectWrite):
             return False
         return is_current(self._engine, self.table_name, parquet)
 
+    def _dataset_current_with_state(self, state) -> bool:
+        from sqlsink.manifest import DatasetV2
+        from sqlsink.sink import normalize_v2, sources_from_dir
+        from sqlsink.sink_postgres import SqlSink
+
+        manifest = self._manifest()
+        if isinstance(manifest, DatasetV2):
+            sources = sources_from_dir(manifest, self.provider.settings.parquet_dir)
+            if any(not Path(path).is_file() for path in sources.values()):
+                return False
+            try:
+                update_id = normalize_v2(manifest, sources, sink=SqlSink(self._engine)).update_id
+            except LookupError:
+                return False
+        else:
+            fact = self._parquet_path(manifest.fact_parquet_key())
+            contour = self._parquet_path(manifest.contour_source)
+            if not Path(fact).is_file() or not Path(contour).is_file():
+                return False
+            update_id, _, _ = compute_dataset_update_id_for_files(manifest, fact, contour)
+        marker = state.marker("dataset", self.table_name)
+        return bool(marker and marker["update_id"] == update_id and state.dataset_intact(manifest))
+
     def mtime(self) -> float:
         # Must always be a finite, valid epoch timestamp (Snakemake uses it
         # for os.utime() on the local proxy file after storing).
         if not self.provider.reachable:
+            return 0.0
+        if self._engine.dialect.name == "postgresql":
+            return self._mtime_with_state(read_planning_state(self._engine))
+        return self._mtime_with_state(None)
+
+    def _mtime_with_state(self, state) -> float:
+        if state is not None:
+            if self.kind == "grants":
+                stamps = [state.marker("table", r.rpartition(".")[2]) for r in self.provider.grant_relations(self.table_name)]
+                dates = [m["published_at"] for m in stamps if m]
+                return max(dates).timestamp() if dates else 0.0
+            kind = "dataset" if self.kind == "dataset" else "table"
+            marker = state.marker(kind, self.table_name)
+            if marker:
+                return marker["published_at"].timestamp()
+            if self.kind == "staged":
+                marker = state.marker("staged", self.table_name)
+                return marker["staged_at"].timestamp() if marker else 0.0
             return 0.0
         if self.kind == "grants":
             stamps = [

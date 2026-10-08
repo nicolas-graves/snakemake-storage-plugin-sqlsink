@@ -435,11 +435,32 @@ def dataset_is_published(spec: dict, manifest: DatasetMaterialization) -> bool:
     the DAG (as a rule param), so a dataset dropped or wiped out of band
     changes the param and re-runs its staging. The engine is disposed before
     returning: a DuckDB file lock must not outlive the check."""
+    if spec.get("type") == "postgres":
+        return datasets_are_published(spec, [manifest])[manifest.name]
     if spec.get("type") == "duckdb" and not os.path.exists(spec["path"]):
         return False
     sink = make_sink(spec, create_markers=False)
     try:
         return sink.current_update_id(manifest.name) is not None and sink.published_intact(manifest)  # type: ignore[arg-type]
+    finally:
+        sink.engine.dispose()
+
+
+def datasets_are_published(spec: dict, manifests) -> dict[str, bool]:
+    """Check all datasets from one PostgreSQL catalog snapshot."""
+    manifests = list(manifests)
+    if spec.get("type") != "postgres":
+        return {manifest.name: dataset_is_published(spec, manifest) for manifest in manifests}
+    from .planning import read_planning_state
+
+    sink = make_sink(spec, create_markers=False)
+    try:
+        state = read_planning_state(sink.engine)
+        return {
+            manifest.name: state.marker("dataset", manifest.name) is not None
+            and state.dataset_intact(manifest, view_schema=sink.view_schema or "public")
+            for manifest in manifests
+        }
     finally:
         sink.engine.dispose()
 

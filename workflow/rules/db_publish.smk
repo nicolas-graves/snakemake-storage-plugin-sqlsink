@@ -129,6 +129,10 @@ _unknown_sinks = set(SINKS) - set(SINK_SPECS)
 if _unknown_sinks:
     raise ValueError(f"unknown sink(s) in config `sinks`: {sorted(_unknown_sinks)}")
 
+# This module is evaluated once per DAG build. Keep the read-only snapshot
+# here, never in a sink or provider that can survive publication.
+_publication_state_by_sink = {}
+
 
 def _published_state(wildcards):
     """"ok" while the sink holds the dataset, else a value that never repeats.
@@ -140,10 +144,13 @@ def _published_state(wildcards):
     import time
 
     from sqlsink.manifest import load_manifest, load_shared_components
-    from sqlsink.sink import dataset_is_published
+    from sqlsink.sink import datasets_are_published
 
     manifest = load_manifest(DATASETS_BY_NAME[wildcards.dataset], load_shared_components(SHARED_COMPONENTS))
-    published = dataset_is_published(SINK_SPECS[wildcards.sink], manifest)
+    if wildcards.sink not in _publication_state_by_sink:
+        all_manifests = [load_manifest(spec, load_shared_components(SHARED_COMPONENTS)) for spec in DATASETS]
+        _publication_state_by_sink[wildcards.sink] = datasets_are_published(SINK_SPECS[wildcards.sink], all_manifests)
+    published = _publication_state_by_sink[wildcards.sink][manifest.name]
     return "ok" if published else f"missing-{time.time_ns()}"
 
 
