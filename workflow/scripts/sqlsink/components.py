@@ -16,8 +16,10 @@ from __future__ import annotations
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import duckdb
+if TYPE_CHECKING:
+    import duckdb
 
 from . import metadata as meta_mod
 from .fingerprint import sha256_file

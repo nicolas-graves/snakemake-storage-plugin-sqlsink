@@ -9,9 +9,10 @@ same `JoinSpec`.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import duckdb
+if TYPE_CHECKING:
+    import duckdb
 
 from .join import physical_join_spec, render_join_sql
 from .manifest import PART_COLUMN, DatasetMaterialization

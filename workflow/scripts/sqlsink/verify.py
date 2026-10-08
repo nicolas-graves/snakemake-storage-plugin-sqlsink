@@ -15,10 +15,14 @@ from __future__ import annotations
 
 import resource
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
-import duckdb
+if TYPE_CHECKING:
+    import duckdb
+
 from sqlalchemy.engine import URL
 
+from ._duckdb import require_duckdb
 from .manifest import DatasetMaterialization
 from .queries import fetch_row
 from .sqlident import quote_ident as _quote, quote_literal as _literal
@@ -151,7 +155,7 @@ def verify_parquet_roundtrip(
     """Parquet-side counterpart of `verify_dataset`: the joined Parquet
     rebuilt from the normalized components must equal the original joined
     Parquet as a multiset, with the same columns, order and types."""
-    con = duckdb.connect()
+    con = require_duckdb().connect()
     try:
         con.execute(f"SET threads={int(threads)}")
         con.execute(f"SET memory_limit={_literal(memory_limit)}")
@@ -189,7 +193,7 @@ def verify_sink(
     multiset, whatever the sink: the sink only says how to read its joined
     relation. Schemas (names, order, types) are compared too when the sink
     keeps the source types (`preserves_types`, i.e. files)."""
-    con = duckdb.connect()
+    con = require_duckdb().connect()
     try:
         con.execute(f"SET threads={int(threads)}")
         con.execute(f"SET memory_limit={_literal(memory_limit)}")
@@ -233,7 +237,7 @@ def verify_dataset(
     url = make_url(sqlalchemy_dsn) if isinstance(sqlalchemy_dsn, str) else sqlalchemy_dsn
     if not url.get_backend_name().startswith("postgres"):
         raise ValueError("verify_dataset needs a PostgreSQL DSN")
-    con = duckdb.connect()
+    con = require_duckdb().connect()
     try:
         con.execute(f"SET threads={int(threads)}")
         con.execute(f"SET memory_limit={_literal(memory_limit)}")

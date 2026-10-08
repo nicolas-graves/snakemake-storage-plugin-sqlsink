@@ -1,15 +1,15 @@
 snakemake
 snakemake-interface-storage-plugins>=4.4,<5
 sqlalchemy>=2.0
-duckdb
 pyyaml
 psycopg[binary]   # PostgreSQL driver + fast COPY path
-duckdb_engine     # SQLAlchemy dialect for the DuckDB sink
-pytz              # DuckDB returns TIMESTAMPTZ as tz-aware datetimes via pytz
 pytest
 
+# Install requirements-duckdb.txt for staging, verification, or the DuckDB sink.
+
 # Two private, repo-local packages, not on PyPI -- install after the above:
-#   pip install -e workflow/scripts               # sqlsink
+#   pip install -e workflow/scripts               # sqlsink core
+#   pip install -e 'workflow/scripts[duckdb]'     # Parquet staging / DuckDB sink
 #   pip install workflow/sql_storage_plugin        # snakemake-storage-plugin-sqlsink (non-editable:
 #                                                   # Snakemake's plugin auto-discovery scans installed
 #                                                   # top-level packages and does not reliably see editable

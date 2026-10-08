@@ -13,9 +13,11 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import duckdb
+if TYPE_CHECKING:
+    import duckdb
+
 from sqlalchemy import inspect, select
 
 from . import metadata as meta_mod

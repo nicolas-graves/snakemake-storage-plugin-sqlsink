@@ -10,10 +10,10 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import asdict, dataclass
 
-import duckdb
 from sqlalchemy import Column, MetaData, Table, inspect
 
 from . import metadata as meta_mod
+from ._duckdb import require_duckdb
 from .engine import bulk_load, upsert_by_pk
 from .fingerprint import LOADER_VERSION, TYPE_MAP_VERSION, compute_update_id_for_file
 from .queries import fetch_row, read_parquet_sql
@@ -39,6 +39,7 @@ class StageReceipt:
 
 
 def _read_parquet_schema_and_stats(parquet_path: str) -> tuple[list[tuple[str, str]], int, dict]:
+    duckdb = require_duckdb()
     con = duckdb.connect()
     try:
         rel = con.sql(f"SELECT * FROM {read_parquet_sql(parquet_path)}")
@@ -172,7 +173,7 @@ def stage_table(engine, table_name: str, parquet_path: str, extra_config: dict |
     with engine.begin() as conn:
         staging_table.drop(conn, checkfirst=True)
         staging_table.create(conn)
-        con = duckdb.connect()
+        con = require_duckdb().connect()
         try:
             rows = con.sql(f"SELECT * FROM {read_parquet_sql(parquet_path)}").fetchall()
             col_names = [c[0] for c in columns]

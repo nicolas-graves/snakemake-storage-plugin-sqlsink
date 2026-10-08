@@ -129,6 +129,28 @@ def test_pg_attach_reads_through_the_secret():
 
 
 @needs_pg
+def test_pg_attach_writable_copies_into_an_existing_table(tmp_path):
+    engine = create_engine(PG_DSN)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text('CREATE TABLE "public"."sqlsink_attach_probe" (id integer PRIMARY KEY, value text)'))
+        con = duckdb.connect()
+        try:
+            path = tmp_path / "attach_probe.parquet"
+            con.execute("COPY (SELECT 1::INTEGER AS id, 'été'::VARCHAR AS value) TO ? (FORMAT parquet)", [str(path)])
+            pg_attach(con, engine.url, alias="writable", read_only=False)
+            con.execute('COPY writable.public.sqlsink_attach_probe FROM ? (FORMAT parquet)', [str(path)])
+            with engine.connect() as conn:
+                assert conn.execute(text('SELECT id, value FROM "public"."sqlsink_attach_probe"')).all() == [(1, "été")]
+        finally:
+            con.close()
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text('DROP TABLE IF EXISTS "public"."sqlsink_attach_probe"'))
+        engine.dispose()
+
+
+@needs_pg
 def test_pg_attach_survives_an_awkward_password():
     import uuid
 

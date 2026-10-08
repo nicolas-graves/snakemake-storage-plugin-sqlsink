@@ -21,12 +21,15 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Protocol
+from typing import TYPE_CHECKING, Any, Iterator, Mapping, Protocol
 
-import duckdb
+if TYPE_CHECKING:
+    import duckdb
+
 from sqlalchemy import Engine
 
 from .fingerprint import compute_dataset_update_id, sha256_source
+from ._duckdb import require_duckdb
 from .manifest import DatasetMaterialization, DatasetV2
 from .queries import ArrowSource, SinkTableSource, bind_sources, compact_select_sql, contour_select_sql, fetch_row
 from .sqlident import quote_ident
@@ -184,6 +187,7 @@ def duckdb_session(
     """DuckDB connection that can spill to disk. An in-memory connection has
     no temp directory by default, so a large ORDER BY over wide geometry
     strings dies at `memory_limit` instead of spilling."""
+    duckdb = require_duckdb()
     spill = Path(spill_dir) / f".duckdb_tmp.{os.getpid()}"
     spill.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect()
@@ -404,6 +408,7 @@ def make_sink(spec: dict, *, create_markers: bool = True) -> Sink:
             return SqlSink(make_engine(resolve_url(credentials=spec.get("credentials"), dsn=spec.get("dsn"))))
         from .metadata import create_all
 
+        require_duckdb()
         engine = make_engine(f"duckdb:///{spec['path']}")
         if spec.get("schema"):
             _default_schema(engine, spec["schema"])

@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import asdict, dataclass
+from typing import TYPE_CHECKING
 
-import duckdb
+if TYPE_CHECKING:
+    import duckdb
+
 from sqlalchemy import Column, ForeignKeyConstraint, Index, MetaData, PrimaryKeyConstraint, Table, Text, inspect, select, text
 
 from . import metadata as meta_mod
@@ -165,11 +168,13 @@ def pg_conninfo(url) -> str:
     return " ".join(f"{key}={_libpq_value(value)}" for key, value in pairs if value is not None)
 
 
-def pg_attach(con: duckdb.DuckDBPyConnection, url, alias: str = "pg") -> None:
-    """Attach a PostgreSQL database read-only to a DuckDB connection. The
+def pg_attach(con: duckdb.DuckDBPyConnection, url, alias: str = "pg", *, read_only: bool = True) -> None:
+    """Attach a PostgreSQL database to a DuckDB connection. The
     credentials live in a temporary DuckDB secret and only the non-secret
     options go in the ATTACH string, which is what DuckDB quotes in a failed
-    attach's message: the password never reaches it."""
+    attach's message: the password never reaches it. Writable attachments
+    are for isolated staging experiments; they use a separate PostgreSQL
+    transaction from the SQLAlchemy connection."""
     if not url.get_backend_name().startswith("postgres"):
         raise ValueError("a PostgreSQL URL is needed")
     con.execute("INSTALL postgres; LOAD postgres;")
@@ -189,7 +194,8 @@ def pg_attach(con: duckdb.DuckDBPyConnection, url, alias: str = "pg") -> None:
     # A `host` in the options string (multi-host / socket dir DSN) overrides
     # the secret's HOST (checked on DuckDB 1.5.5), as libpq's own precedence.
     options = quote_literal(pg_conninfo(url))
-    con.execute(f"ATTACH {options} AS {quote_ident(alias)} (TYPE postgres, SECRET {secret}, READ_ONLY)")
+    mode = ", READ_ONLY" if read_only else ""
+    con.execute(f"ATTACH {options} AS {quote_ident(alias)} (TYPE postgres, SECRET {secret}{mode})")
 
 
 class SqlSink(V2SinkMixin):

@@ -11,6 +11,8 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import tempfile
+from pathlib import Path
 from collections.abc import Iterator
 
 from sqlalchemy import Engine, Table, create_engine, func, insert, select, text, update
@@ -289,3 +291,34 @@ def bulk_load_streaming(conn, table: Table, duckdb_cursor, columns: list[str], b
         conn.execute(insert(table), [dict(zip(columns, row)) for row in batch])
         total += len(batch)
     return total
+
+
+def bulk_load_query(conn, table: Table, duckdb_con, sql: str, columns: list[str]) -> int:
+    """Experimental binary loader for an already-created staging table.
+
+    PostgreSQL's binary COPY stays on ``conn`` so the table and its marker
+    share a transaction. The export file is private to this call and removed
+    even if either COPY fails. It is not selected by staging until the remote
+    payload and elapsed-time comparison has been made. Other sinks retain
+    their Arrow batch path.
+    """
+    if conn.engine.dialect.name != "postgresql":
+        return bulk_load_streaming(conn, table, duckdb_con.execute(sql), columns)
+
+    ref = qualified(table.name, table.schema)
+    col_list = ", ".join(quote_ident(c) for c in columns)
+    with tempfile.TemporaryDirectory(prefix="sqlsink-pg-copy-") as directory:
+        path = Path(directory) / "rows.bin"
+        # LOAD is idempotent and works with an extension installed ahead of
+        # time, avoiding a download during a staging transaction.
+        duckdb_con.execute("LOAD postgres")
+        count = duckdb_con.execute(
+            f"COPY ({sql}) TO ? (FORMAT postgres_binary)", [str(path)]
+        ).fetchone()[0]
+        raw_conn = conn.connection
+        cursor = raw_conn.driver_connection.cursor() if hasattr(raw_conn, "driver_connection") else raw_conn.cursor()
+        with cursor.copy(f"COPY {ref} ({col_list}) FROM STDIN WITH (FORMAT binary)") as copy:
+            with path.open("rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    copy.write(chunk)
+    return count
