@@ -10,6 +10,7 @@ from sqlalchemy import text
 from fixtures.make_fixtures import make_default_fixtures  # noqa: E402
 from sqlsink.engine import make_engine  # noqa: E402
 from sqlsink.metadata import create_all  # noqa: E402
+from sqlsink.planning import invalidate_shared_planning_state  # noqa: E402
 
 
 @pytest.fixture
@@ -25,7 +26,9 @@ def engine(tmp_path):
                 conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
             conn.execute(text('CREATE SCHEMA "public"'))
     create_all(eng)
+    invalidate_shared_planning_state()  # the database was just reset under any cached snapshot
     yield eng
+    invalidate_shared_planning_state()
     eng.dispose()
 
 

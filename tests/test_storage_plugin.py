@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import event
 
 from sqlsink.publish import publish_tables
 from sqlsink.stage import fetch_marker, stage_table
@@ -32,6 +33,9 @@ def provider(engine, parquet_dir, tmp_path):
         settings=StorageProviderSettings(dsn="duckdb:///:memory:", parquet_dir=str(next(iter(parquet_dir.values())).parent)),
     )
     p.engine = engine  # reuse the test's in-memory engine/connection pool
+    # These tests write through the raw engine, behind the provider's back: a
+    # committed write must drop the cached planning snapshot, as a storage write does.
+    event.listen(engine, "commit", lambda _conn: p.invalidate_planning_state())
     return p
 
 
