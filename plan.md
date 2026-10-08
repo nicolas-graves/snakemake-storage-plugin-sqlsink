@@ -125,3 +125,29 @@ but its built library reports `v0.0.1` because the source archive lacks Git
 tag metadata. A first packaging override did not change the embedded version.
 A corrected CMake argument was not validated after the remote benchmark failed
 the acceptance gate.
+
+## SSH compression benchmark, 2026-10-08
+
+The same 995,075-row Parquet source was loaded through four fresh analytics SSH
+tunnels in off/on/on/off order. Each tunnel had a unique control socket and an
+explicit SSH `Compression` setting. Each COPY used the current CSV loader into
+a disposable PostgreSQL table inside a rolled-back transaction. Row counts and
+row checksums matched in all four trials.
+
+| Order | SSH compression | COPY elapsed | Client CPU | SSH bytes acknowledged |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Off | 257.773 s | 27.901 s | 242,790,019 |
+| 2 | On | 211.902 s | 27.740 s | 242,907,619 |
+| 3 | On | 196.283 s | 12.257 s | 242,907,647 |
+| 4 | Off | 198.426 s | 9.367 s | 242,789,647 |
+
+The byte counts are TCP `bytes_acked` on the SSH connection to the VPS,
+sampled with `ss -tinp`; they include SSH and TCP framing but exclude
+retransmissions. The CSV COPY payload was 242,179,515 bytes in each run.
+Compression did not reduce wire traffic (the compressed runs sent about 0.05%
+more acknowledged bytes). The final uncompressed run matched the compressed
+timings, so the earlier elapsed-time change is consistent with tunnel or server
+variation rather than a repeatable compression benefit. PostgreSQL uses TLS
+inside this tunnel, which likely leaves the SSH layer encrypted data with
+little compressible structure. Keep SSH compression off and investigate moving
+the 12 MB Parquet file to a runner near PostgreSQL instead.
