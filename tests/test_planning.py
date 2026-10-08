@@ -1,6 +1,6 @@
 """Planning snapshots preserve the same marker and relation decisions."""
 
-from sqlsink.planning import PlanningState, read_planning_state
+from sqlsink.planning import PlanningState, read_planning_state, shared_planning_state, invalidate_shared_planning_state
 from sqlsink.metadata import staging_name
 from sqlsink.manifest import load_manifest
 
@@ -11,6 +11,32 @@ def state():
         {},
         set(),
     )
+
+
+def test_shared_snapshot_reuses_state_and_expands_roles(monkeypatch):
+    from sqlalchemy import create_engine
+    from sqlsink import planning
+
+    engine = create_engine("sqlite:///:memory:")
+    calls = []
+
+    def read(_engine, *, roles):
+        calls.append(roles)
+        return state()
+
+    monkeypatch.setattr(planning, "read_planning_state", read)
+    invalidate_shared_planning_state()
+    try:
+        first = shared_planning_state(engine, roles=["a"])
+        assert shared_planning_state(engine, roles=["a"]) is first
+        second = shared_planning_state(engine, roles=["b"])
+        assert second is not first
+        assert calls == [["a"], ["a", "b"]]
+        invalidate_shared_planning_state()
+        assert shared_planning_state(engine) is not second
+    finally:
+        invalidate_shared_planning_state()
+        engine.dispose()
 
 
 def test_table_state_requires_matching_marker_and_relation():
@@ -90,3 +116,28 @@ def test_reader_does_not_create_markers():
         assert set(inspect(engine).get_table_names()) == before
     finally:
         engine.dispose()
+
+
+def test_postgres_reader_uses_at_most_two_data_statements(engine):
+    import pytest
+    from sqlalchemy import event
+    from sqlsink.metadata import create_all
+
+    if engine.dialect.name != "postgresql":
+        pytest.skip("needs PostgreSQL")
+    statements = []
+
+    def record(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        read_planning_state(engine)
+        assert len([s for s in statements if not s.startswith("SET ")]) <= 2
+        statements.clear()
+        create_all(engine)
+        statements.clear()
+        read_planning_state(engine, roles=["runtime"])
+        assert len([s for s in statements if not s.startswith("SET ")]) <= 2
+    finally:
+        event.remove(engine, "before_cursor_execute", record)

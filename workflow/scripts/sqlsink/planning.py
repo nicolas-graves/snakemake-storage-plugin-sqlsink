@@ -1,18 +1,21 @@
 """Read-only catalog snapshot for planning predicates.
 
 One PostgreSQL transaction supplies marker rows, relation kinds and explicit
-SELECT grants. A snapshot belongs to one planning pass; callers must not cache
-it across staging or publication.
+SELECT grants. The process-local snapshot is invalidated by the provider's
+write hooks and workflow onstart hook. Callers must not cache it across staging
+or publication.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
-from sqlalchemy import select, text
+from sqlalchemy import text
 
 from . import metadata as meta
 from .manifest import DatasetV2
+from .engine import get_engine
 
 
 MARKERS = {
@@ -78,6 +81,27 @@ class PlanningState:
         return True
 
 
+_shared_states: dict[str, tuple[frozenset[str], PlanningState]] = {}
+
+
+def invalidate_shared_planning_state() -> None:
+    _shared_states.clear()
+
+
+def shared_planning_state(engine_or_url, *, roles=()) -> PlanningState:
+    """Reuse one snapshot per URL, rereading only when new roles are needed."""
+    engine = engine_or_url if hasattr(engine_or_url, "dialect") else get_engine(engine_or_url)
+    key = engine.url.render_as_string(hide_password=False)
+    requested = frozenset(roles)
+    cached = _shared_states.get(key)
+    if cached is not None and requested <= cached[0]:
+        return cached[1]
+    all_roles = requested | (cached[0] if cached else frozenset())
+    state = read_planning_state(engine, roles=sorted(all_roles))
+    _shared_states[key] = (all_roles, state)
+    return state
+
+
 def read_planning_state(engine, *, roles=()) -> PlanningState:
     """Read metadata in one bounded, read-only PostgreSQL transaction."""
     if engine.dialect.name != "postgresql":
@@ -86,32 +110,49 @@ def read_planning_state(engine, *, roles=()) -> PlanningState:
     with engine.connect() as conn:
         conn.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
         conn.execute(text("SET LOCAL statement_timeout = '15s'"))
-        existing = set(conn.execute(text(
+        roles = sorted(set(roles))
+        catalog = conn.execute(text(
+            "SELECT 'table' AS kind, to_jsonb(t) AS value FROM ("
             "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = current_schema() "
-            "AND tablename LIKE '_pipeline_meta_%'"
-        )).scalars())
-        for kind, (table, key) in MARKERS.items():
-            if table.name in existing:
-                marker_rows[kind] = {row[key]: dict(row) for row in conn.execute(select(table)).mappings()}
-        dataset_components = {}
-        if meta.dataset_components.name in existing:
-            for row in conn.execute(select(meta.dataset_components)).mappings():
-                dataset_components.setdefault(row["dataset_name"], {})[row["component_name"]] = row["component_update_id"]
-        relations = {(row[0], row[1]): row[2] for row in conn.execute(text(
+            "AND tablename LIKE '_pipeline_meta_%') t "
+            "UNION ALL SELECT 'relation', to_jsonb(t) FROM ("
             "SELECT n.nspname, c.relname, c.relkind FROM pg_catalog.pg_class c "
             "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
             "WHERE c.relkind IN ('r', 'p', 'v', 'm') "
-            "AND n.nspname NOT IN ('pg_catalog', 'information_schema')"
-        ))}
+            "AND n.nspname NOT IN ('pg_catalog', 'information_schema')) t "
+            "UNION ALL SELECT 'grant', to_jsonb(t) FROM ("
+            "SELECT r.rolname, n.nspname, c.relname FROM pg_catalog.pg_class c "
+            "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+            "CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) a "
+            "JOIN pg_catalog.pg_roles r ON r.oid = a.grantee "
+            "WHERE r.rolname = ANY(:roles) AND a.privilege_type = 'SELECT') t"
+        ), {"roles": roles})
+        existing = set()
+        relations = {}
         grants = set()
-        roles = sorted(set(roles))
-        if roles:
-            grants = {(row[0], row[1], row[2]) for row in conn.execute(text(
-                "SELECT r.rolname, n.nspname, c.relname FROM pg_catalog.pg_class c "
-                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
-                "CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) a "
-                "JOIN pg_catalog.pg_roles r ON r.oid = a.grantee "
-                "WHERE r.rolname = ANY(:roles) AND a.privilege_type = 'SELECT'"
-            ), {"roles": roles})}
+        for kind, row in catalog:
+            if kind == "table":
+                existing.add(row["tablename"])
+            elif kind == "relation":
+                relations[(row["nspname"], row["relname"])] = row["relkind"]
+            else:
+                grants.add((row["rolname"], row["nspname"], row["relname"]))
+        queries = []
+        for kind, (table, _) in MARKERS.items():
+            if table.name in existing:
+                queries.append(f"SELECT '{kind}' AS kind, to_jsonb(t) AS value FROM \"{table.name}\" t")
+        if meta.dataset_components.name in existing:
+            queries.append(f"SELECT 'dataset_components' AS kind, to_jsonb(t) AS value FROM \"{meta.dataset_components.name}\" t")
+        dataset_components = {}
+        if queries:
+            for kind, row in conn.execute(text(" UNION ALL ".join(queries))):
+                if kind == "dataset_components":
+                    dataset_components.setdefault(row["dataset_name"], {})[row["component_name"]] = row["component_update_id"]
+                else:
+                    table, key = MARKERS[kind]
+                    for column in table.columns:
+                        if column.name in row and isinstance(row[column.name], str) and column.type.python_type is datetime:
+                            row[column.name] = datetime.fromisoformat(row[column.name])
+                    marker_rows[kind][row[key]] = row
         conn.rollback()
     return PlanningState(marker_rows, relations, grants, dataset_components)

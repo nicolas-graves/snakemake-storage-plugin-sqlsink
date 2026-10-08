@@ -1,0 +1,11 @@
+(specifications->manifest
+ '("python"
+   "python-pytest"
+   "python-sqlalchemy"
+   "python-pyyaml"
+   "python-psycopg"
+   "python-duckdb"
+   "python-duckdb-engine"
+   "python-pyarrow"
+   "python-pytz"
+   "python-snakemake-interface-storage-plugins"))

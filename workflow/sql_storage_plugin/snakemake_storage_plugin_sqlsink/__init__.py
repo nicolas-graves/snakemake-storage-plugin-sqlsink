@@ -60,10 +60,10 @@ from snakemake_interface_storage_plugins.settings import StorageProviderSettings
 
 from sqlsink import grants as grants_mod
 from sqlsink.credentials import load_credentials
-from sqlsink.engine import make_engine
+from sqlsink.engine import get_engine
 from sqlsink.fingerprint import compute_dataset_update_id_for_files, published_marker
 from sqlsink.stage import fetch_marker, fetch_staged_marker, is_current, stage_table
-from sqlsink.planning import read_planning_state
+from sqlsink.planning import shared_planning_state, invalidate_shared_planning_state
 from sqlsink.fingerprint import compute_update_id_for_file
 
 TABLE_NAME_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")  # use fullmatch: `$` also matches before a final "\n"
@@ -142,7 +142,7 @@ class StorageProvider(StorageProviderBase):
         # (`sqlsink.metadata.create_all`). Construction only probes the connection.
         # Resolved outside the try below: a missing/undecryptable credentials
         # record is a configuration error, not an unreachable server.
-        self.engine = make_engine(resolve_url(self.settings))
+        self.engine = get_engine(resolve_url(self.settings))
         try:
             with self.engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
@@ -155,22 +155,19 @@ class StorageProvider(StorageProviderBase):
         self._grants = None
         self._inventory_cache = None
         self._inventory_state = None
-        self._direct_state = None
 
     def direct_state(self):
         """Share one catalog read across direct DAG checks until a write occurs."""
-        if self._direct_state is None:
-            roles = []
-            if self.settings.grants_file:
-                if self._grants is None:
-                    import yaml
-                    self._grants = yaml.safe_load(Path(self.settings.grants_file).read_text()) or {}
-                roles = list(self._grants)
-            self._direct_state = read_planning_state(self.engine, roles=roles)
-        return self._direct_state
+        roles = []
+        if self.settings.grants_file:
+            if self._grants is None:
+                import yaml
+                self._grants = yaml.safe_load(Path(self.settings.grants_file).read_text()) or {}
+            roles = list(self._grants)
+        return shared_planning_state(self.engine, roles=roles)
 
     def invalidate_planning_state(self):
-        self._direct_state = None
+        invalidate_shared_planning_state()
         self._inventory_cache = None
         self._inventory_state = None
 
@@ -184,7 +181,7 @@ class StorageProvider(StorageProviderBase):
                 import yaml
                 self._grants = yaml.safe_load(Path(self.settings.grants_file).read_text()) or {}
                 roles = list(self._grants)
-            self._inventory_state = read_planning_state(self.engine, roles=roles)
+            self._inventory_state = shared_planning_state(self.engine, roles=roles)
         return self._inventory_state
 
     def manifests(self) -> dict:

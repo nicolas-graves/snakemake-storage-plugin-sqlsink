@@ -25,6 +25,17 @@ def make_engine(dsn: str | URL, **kwargs) -> Engine:
     return create_engine(dsn, **kwargs)
 
 
+_shared_engines: dict[str, Engine] = {}
+
+
+def get_engine(dsn: str | URL) -> Engine:
+    """Return the process-local engine used by planning consumers."""
+    key = dsn.render_as_string(hide_password=False) if isinstance(dsn, URL) else str(dsn)
+    if key not in _shared_engines:
+        _shared_engines[key] = make_engine(dsn)
+    return _shared_engines[key]
+
+
 LOCK_TIMEOUT_ENV = "SQLSINK_LOCK_TIMEOUT"
 KEEP_OLD_ENV = "SQLSINK_KEEP_OLD"
 ANALYZE_ENV = "SQLSINK_ANALYZE"

@@ -52,11 +52,16 @@ def test_postgres_direct_checks_share_snapshot_until_storage_write(provider, mon
     states = iter((published, missing))
     calls = []
 
-    def read(engine, *, roles):
-        calls.append(roles)
-        return next(states)
+    cached = []
 
-    monkeypatch.setitem(plugin_globals, "read_planning_state", read)
+    def read(engine, *, roles):
+        if not cached:
+            calls.append(roles)
+            cached.append(next(states))
+        return cached[0]
+
+    monkeypatch.setitem(plugin_globals, "shared_planning_state", read)
+    monkeypatch.setitem(plugin_globals, "invalidate_shared_planning_state", cached.clear)
     obj = _obj(provider, "published/t")
     assert obj.exists()
     assert obj.mtime() == published.marker("table", "t")["published_at"].timestamp()
